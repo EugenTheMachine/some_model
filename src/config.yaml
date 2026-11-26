@@ -1,0 +1,46 @@
+meta:
+  data_dir: ../data
+  experiment_name: null
+
+preprocessing:
+  imgsz: 512
+  train_data_ratio: 1.0
+  seed: 42
+  dim_in: 1
+  augmentation_type: minimal
+  dataset: null
+  source_dataset: [all]
+  modality: null
+
+training:
+  epochs: 10
+  patience: 5
+  batch_size: 4
+  val_ratio: 0.2
+  test_ratio: 0.2
+  val_interval: 1
+  warmup_epochs: 2
+  resume: false
+  amp: false
+  num_workers: 0
+  length_of_epoch: null
+
+model:
+  model_name: affinity_guided_mlp
+  num_classes: 2
+  freeze_backbone_epochs: 0
+  pretrained_backbone: false
+  dropout: 0.0
+  input_channels: 1
+  backbone_channels: [64, 128, 256, 512, 1024]
+  feature_channels: 32
+  num_slots: 32
+  mlp_channels: [64, 32]
+  use_aggregation: true
+
+optimizer:
+  type: AdamW
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  momentum: 0.9
+  backbone_lr_mult: 0.1
