@@ -32,10 +32,12 @@ class Segmentation_Dataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         random_seed: int | None = None,
         mode: str = "train",
         augmentation_type: str = "minimal",
+        binarize_masks: bool = False,
     ) -> None:
         self.X = list(img)
         self.Y = list(label)
         self.common_transforms = common_transforms
+        self.binarize_masks = binarize_masks
         if len(self.X) != len(self.Y):
             raise ValueError("The number of images and labels must be the same.")
         self.metadata = (
@@ -79,6 +81,8 @@ class Segmentation_Dataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             data = data.unsqueeze(0)
         if data.ndim != 3 or label.ndim != 3:
             raise ValueError("Transformed image and label must be CHW tensors.")
+        if self.binarize_masks:
+            label = (label != 0).to(dtype=torch.int32)
         if data.shape[-2:] != label.shape[-2:]:
             raise ValueError("Transformed image and label dimensions differ.")
         if not torch.isfinite(data).all():

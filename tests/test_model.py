@@ -14,6 +14,7 @@ from src.model.head import AffinityGuidedAggregation
 from src.model.eval import InstanceSegmentationMetrics
 from src.model.loss import AffinityGuidedLoss, build_affinity_targets
 from src.model.model import AffinityGuidedMLPNet, InstanSegModel
+from src.model.semantic import SemanticSegmentationLoss, SemanticSegmentationUNet
 from src.model.train import train_epoch
 from src.model.utils import load_config
 
@@ -98,6 +99,45 @@ def test_dataset_preloads_and_collates_padded_instance_masks():
     assert batch_masks.dtype == torch.int32
     assert lengths.dtype == torch.int32
     assert set(torch.unique(batch_masks).tolist()) <= {0, 1}
+
+
+def test_semantic_dataset_binarizes_every_nonzero_mask_value():
+    """Semantic preprocessing maps all nonzero instance IDs to foreground."""
+    image = np.zeros((16, 16), dtype=np.uint8)
+    mask = np.zeros((16, 16), dtype=np.int32)
+    mask[2:6, 2:6] = 8
+    mask[8:12, 8:12] = -1
+    dataset = Segmentation_Dataset(
+        [image],
+        [mask],
+        common_transforms=False,
+        size=(16, 16),
+        dim_in=1,
+        mode="test",
+        binarize_masks=True,
+    )
+
+    _, binary_mask = dataset[0]
+
+    assert set(torch.unique(binary_mask).tolist()) <= {0, 1}
+    assert torch.all(binary_mask[0, 2:6, 2:6] == 1)
+    assert torch.all(binary_mask[0, 8:12, 8:12] == 1)
+
+
+def test_semantic_unet_emits_binary_foreground_logits_and_backpropagates():
+    """Classical U-Net output matches binary masks and supports optimization."""
+    model = SemanticSegmentationUNet(in_channels=1, channels=(4, 8, 16))
+    images = torch.randn(2, 1, 32, 32)
+    masks = torch.zeros(2, 1, 32, 32, dtype=torch.int32)
+    masks[:, :, 8:24, 8:24] = 1
+
+    logits = model(images)
+    loss = SemanticSegmentationLoss()(logits, masks)
+    loss.backward()
+
+    assert logits.shape == (2, 1, 32, 32)
+    assert torch.isfinite(loss)
+    assert model.output.weight.grad is not None
 
 
 def test_configuration_rejects_unsupported_optimizer():
@@ -246,6 +286,25 @@ def test_facade_trains_saves_and_evaluates(tmp_path, monkeypatch):
     assert (artifact_dir / "checkpoints" / "last.pt").is_file()
     assert (artifact_dir / "checkpoints" / "best.pt").is_file()
     assert {"loss", "precision", "recall", "accuracy", "f1"} <= result.keys()
+
+    semantic_facade = InstanSegModel(
+        data_dir=str(data_dir),
+        experiment_name="semantic-integration",
+        imgsz=32,
+        batch_size=1,
+        epochs=1,
+        warmup_epochs=0,
+        num_workers=0,
+        input_channels=1,
+        dim_in=1,
+        model_name="semantic_unet",
+        unet_channels=[4, 8, 16],
+    )
+    semantic_history = semantic_facade.train()
+    semantic_result = semantic_facade.eval(subset="test")
+
+    assert len(semantic_history) == 1
+    assert {"loss", "pixel_accuracy", "dice", "iou"} <= semantic_result.keys()
 
 
 def test_kaggle_staging_copies_only_notebook_and_metadata(tmp_path):

@@ -1,10 +1,15 @@
-# Affinity-Guided Cell Instance Segmentation
+# Cell Segmentation
 
 This project implements a single-pass U-Net instance-segmentation model for
 microscopy images. It predicts foreground, four directional affinities, and
 per-pixel assignments to a fixed number of instance slots. Hungarian matching
 is used only to construct training targets; inference uses a per-pixel slot
 argmax without clustering or connected-component post-processing.
+
+It also provides a classical U-Net binary semantic-segmentation baseline.
+Select `model_name="semantic_unet"` and configure `unet_channels` to train it
+through the same data-loading and checkpointing facade. In this mode, all
+nonzero ground-truth mask pixels are converted to foreground value 1.
 
 ## Setup
 

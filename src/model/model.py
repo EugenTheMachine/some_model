@@ -17,6 +17,11 @@ from torch import nn
 from .decoder import Decoder, UNetDecoderFeatures
 from .encoder import UNetEncoder
 from .head import InstanceSegmentationHead
+from .semantic import (
+    SemanticSegmentationLoss,
+    SemanticSegmentationUNet,
+    eval_semantic_epoch,
+)
 from .utils import (
     DEFAULT_CONFIG_PATH,
     PROJECT_ROOT,
@@ -259,6 +264,11 @@ class InstanSegModel:
                 layers=model_config.get("layers", (256, 128, 64, 32)),
                 dropout=model_config["dropout"],
             )
+        if model_config["model_name"] == "semantic_unet":
+            return SemanticSegmentationUNet(
+                in_channels=model_config["input_channels"],
+                channels=model_config["unet_channels"],
+            )
         return AffinityGuidedMLPNet(
             in_channels=model_config["input_channels"],
             backbone_channels=model_config["backbone_channels"],
@@ -303,6 +313,7 @@ class InstanSegModel:
                 mode="train" if training and split_name == "train" else "test",
                 augmentation_type=config["preprocessing"]["augmentation_type"],
                 channel_invariant=config["preprocessing"]["dim_in"] == 1,
+                binarize_masks=config["model"]["model_name"] == "semantic_unet",
             )
         return splits, datasets
 
@@ -368,6 +379,7 @@ class InstanSegModel:
         from .train import train_epoch
 
         config = self._load_effective_config(overrides)
+        semantic_mode = config["model"]["model_name"] == "semantic_unet"
         seed_everything(config["preprocessing"]["seed"])
         if config["meta"]["experiment_name"] is None:
             config["meta"]["experiment_name"] = generated_experiment_name()
@@ -396,7 +408,11 @@ class InstanSegModel:
         self.logger.info("Data loaders and preprocessing initialized.")
 
         self.model = self._build_model(config).to(self.device)
-        loss_fn = AffinityGuidedLoss()
+        loss_fn = (
+            SemanticSegmentationLoss()
+            if semantic_mode
+            else AffinityGuidedLoss()
+        )
         base_lr = config["optimizer"]["learning_rate"]
         backbone = getattr(self.model, "backbone", None)
         backbone_parameters = list(backbone.parameters()) if backbone else []
@@ -543,16 +559,26 @@ class InstanSegModel:
             improved = False
             if validate:
                 self.logger.info("Validation starting for epoch %d", epoch)
-                metric_evaluator.reset()
-                validation = eval_epoch(
-                    self.model,
-                    self.device,
-                    loaders["val"],
-                    loss_fn,
-                    metric_evaluator,
-                    amp=amp_enabled,
-                    progress_description="Validation",
-                )
+                if semantic_mode:
+                    validation = eval_semantic_epoch(
+                        self.model,
+                        self.device,
+                        loaders["val"],
+                        loss_fn,
+                        amp=amp_enabled,
+                        progress_description="Validation",
+                    )
+                else:
+                    metric_evaluator.reset()
+                    validation = eval_epoch(
+                        self.model,
+                        self.device,
+                        loaders["val"],
+                        loss_fn,
+                        metric_evaluator,
+                        amp=amp_enabled,
+                        progress_description="Validation",
+                    )
                 record.update(validation)
                 record["val_loss"] = validation["loss"]
                 self.logger.info("Validation metrics: %s", validation)
@@ -609,16 +635,26 @@ class InstanSegModel:
             self.model.load_state_dict(final_checkpoint["model_state_dict"])
         if loaders.get("test") is not None:
             self.logger.info("Final test evaluation starting.")
-            metric_evaluator.reset()
-            test_results = eval_epoch(
-                self.model,
-                self.device,
-                loaders["test"],
-                loss_fn,
-                metric_evaluator,
-                amp=amp_enabled,
-                progress_description="Test",
-            )
+            if semantic_mode:
+                test_results = eval_semantic_epoch(
+                    self.model,
+                    self.device,
+                    loaders["test"],
+                    loss_fn,
+                    amp=amp_enabled,
+                    progress_description="Test",
+                )
+            else:
+                metric_evaluator.reset()
+                test_results = eval_epoch(
+                    self.model,
+                    self.device,
+                    loaders["test"],
+                    loss_fn,
+                    metric_evaluator,
+                    amp=amp_enabled,
+                    progress_description="Test",
+                )
             self.logger.info("Final test results: %s", test_results)
         self.history = history
         self.config = config
@@ -652,15 +688,26 @@ class InstanSegModel:
                     raise ValueError("Checkpoint has no model_state_dict.")
                 self.model.load_state_dict(state)
         self.model.eval()
-        results = eval_epoch(
-            self.model,
-            self.device,
-            loaders[subset],
-            AffinityGuidedLoss(),
-            InstanceSegmentationMetrics(),
-            amp=config["training"]["amp"] and self.device.type == "cuda",
-            progress_description=subset.capitalize(),
-        )
+        amp_enabled = config["training"]["amp"] and self.device.type == "cuda"
+        if config["model"]["model_name"] == "semantic_unet":
+            results = eval_semantic_epoch(
+                self.model,
+                self.device,
+                loaders[subset],
+                SemanticSegmentationLoss(),
+                amp=amp_enabled,
+                progress_description=subset.capitalize(),
+            )
+        else:
+            results = eval_epoch(
+                self.model,
+                self.device,
+                loaders[subset],
+                AffinityGuidedLoss(),
+                InstanceSegmentationMetrics(),
+                amp=amp_enabled,
+                progress_description=subset.capitalize(),
+            )
         return results
 
 

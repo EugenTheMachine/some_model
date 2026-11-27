@@ -53,6 +53,7 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "dropout": 0.0,
         "input_channels": 1,
         "backbone_channels": [64, 128, 256, 512, 1024],
+        "unet_channels": [32, 64, 128, 256, 512],
         "feature_channels": 32,
         "num_slots": 32,
         "mlp_channels": [64, 32],
@@ -96,6 +97,7 @@ FLAT_OVERRIDE_SECTIONS = {
     "dropout": "model",
     "input_channels": "model",
     "backbone_channels": "model",
+    "unet_channels": "model",
     "feature_channels": "model",
     "num_slots": "model",
     "mlp_channels": "model",
@@ -232,7 +234,11 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if training["length_of_epoch"] is not None:
         _require_int(training["length_of_epoch"], "length_of_epoch", 1)
 
-    if model["model_name"] not in {"affinity_guided_mlp", "instanseg_unet"}:
+    if model["model_name"] not in {
+        "affinity_guided_mlp",
+        "instanseg_unet",
+        "semantic_unet",
+    }:
         raise ValueError(f"Unsupported model_name: {model['model_name']!r}")
     for key in ("num_classes", "input_channels", "feature_channels", "num_slots"):
         _require_int(model[key], key, 1)
@@ -247,6 +253,20 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("backbone_channels must contain at least two widths.")
     for channel in model["backbone_channels"]:
         _require_int(channel, "backbone channel", 1)
+    if (
+        not isinstance(model["unet_channels"], (list, tuple))
+        or len(model["unet_channels"]) < 2
+    ):
+        raise ValueError("unet_channels must contain at least two widths.")
+    for channel in model["unet_channels"]:
+        _require_int(channel, "U-Net channel", 1)
+    if model["model_name"] == "semantic_unet":
+        downsampling_factor = 2 ** (len(model["unet_channels"]) - 1)
+        if preprocessing["imgsz"] % downsampling_factor:
+            raise ValueError(
+                "imgsz must be divisible by the semantic U-Net downsampling factor "
+                f"({downsampling_factor})."
+            )
     if (
         not isinstance(model["mlp_channels"], (list, tuple))
         or len(model["mlp_channels"]) != 2

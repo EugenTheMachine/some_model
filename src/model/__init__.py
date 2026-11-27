@@ -9,6 +9,11 @@ from .model import (
     InstanSeg_UNet,
     ModelFacade,
 )
+from .semantic import (
+    SemanticSegmentationLoss,
+    SemanticSegmentationUNet,
+    eval_semantic_epoch,
+)
 from .train import train_epoch
 
 __all__ = [
@@ -20,7 +25,10 @@ __all__ = [
     "InstanSegModel",
     "InstanSeg_UNet",
     "ModelFacade",
+    "SemanticSegmentationLoss",
+    "SemanticSegmentationUNet",
     "build_affinity_targets",
     "eval_epoch",
+    "eval_semantic_epoch",
     "train_epoch",
 ]
