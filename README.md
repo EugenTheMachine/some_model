@@ -6,6 +6,9 @@ per-pixel assignments to a fixed number of instance slots. Hungarian matching
 is used only to construct training targets; inference uses a per-pixel slot
 argmax without clustering or connected-component post-processing.
 
+It also includes `affinity_guided_recurrent`, which adds affinity-gated
+ConvGRU message passing and recurrent slot refinement before dense assignment.
+
 It also provides a classical U-Net binary semantic-segmentation baseline.
 Select `model_name="semantic_unet"` and configure `unet_channels` to train it
 through the same data-loading and checkpointing facade. In this mode, all

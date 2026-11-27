@@ -16,7 +16,7 @@ from torch import nn
 
 from .decoder import Decoder, UNetDecoderFeatures
 from .encoder import UNetEncoder
-from .head import InstanceSegmentationHead
+from .head import AffinityGuidedRecurrentHead, InstanceSegmentationHead
 from .semantic import (
     SemanticSegmentationLoss,
     SemanticSegmentationUNet,
@@ -106,6 +106,72 @@ class AffinityGuidedMLPNet(nn.Module):
         """Return background ID 0 and positive slot IDs for a batch."""
         self.eval()
         return self(inputs)["instance_map"]
+
+
+class AffinityGuidedRecurrentNet(nn.Module):
+    """Affinity-guided recurrent pixel grouping with fixed instance slots."""
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        backbone_channels: Sequence[int] = (64, 128, 256, 512, 1024),
+        feature_channels: int = 32,
+        num_slots: int = 32,
+        recurrent_hidden_channels: int = 32,
+        recurrent_iterations: int = 3,
+        slot_iterations: int = 2,
+        dropout: float = 0.0,
+        minimum_instance_area: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        recurrent_hidden_channels = kwargs.pop(
+            "recurrent_hidden_dim",
+            kwargs.pop("hidden_channels", recurrent_hidden_channels),
+        )
+        recurrent_iterations = kwargs.pop(
+            "num_recurrent_iterations", recurrent_iterations
+        )
+        slot_iterations = kwargs.pop(
+            "slot_update_iterations",
+            kwargs.pop("num_slot_iterations", slot_iterations),
+        )
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unknown recurrent model arguments: {unknown}")
+        self.backbone = UNetBackbone(
+            in_channels=in_channels,
+            channels=backbone_channels,
+            dropout=dropout,
+        )
+        self.head = AffinityGuidedRecurrentHead(
+            in_channels=self.backbone.out_channels,
+            num_slots=num_slots,
+            feature_channels=feature_channels,
+            recurrent_hidden_channels=recurrent_hidden_channels,
+            recurrent_iterations=recurrent_iterations,
+            slot_iterations=slot_iterations,
+            minimum_instance_area=minimum_instance_area,
+        )
+
+    def forward(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return recurrent predictions and a dense instance label map."""
+        if inputs.ndim != 4:
+            raise ValueError("Model input must have shape (N, C, H, W).")
+        if not inputs.is_floating_point():
+            raise TypeError("Model input must be a floating-point tensor.")
+        features = self.backbone(inputs)
+        return self.head(features)
+
+    @torch.no_grad()
+    def predict_instances(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Return a compact positive-integer instance map."""
+        self.eval()
+        return self(inputs)["instance_map"]
+
+
+AffinityGuidedRecurrentUNet = AffinityGuidedRecurrentNet
+RecurrentInstanceSegmentationNet = AffinityGuidedRecurrentNet
 
 
 class InstanSeg_UNet(nn.Module):
@@ -268,6 +334,23 @@ class InstanSegModel:
             return SemanticSegmentationUNet(
                 in_channels=model_config["input_channels"],
                 channels=model_config["unet_channels"],
+            )
+        if model_config["model_name"] in {
+            "affinity_guided_recurrent",
+            "affinity_guided_recurrent_instance_segmentation",
+            "affinity_guided_recurrent_net",
+            "affinity_guided_recurrent_unet",
+        }:
+            return AffinityGuidedRecurrentNet(
+                in_channels=model_config["input_channels"],
+                backbone_channels=model_config["backbone_channels"],
+                feature_channels=model_config["feature_channels"],
+                num_slots=model_config["num_slots"],
+                recurrent_hidden_channels=model_config["recurrent_hidden_channels"],
+                recurrent_iterations=model_config["recurrent_iterations"],
+                slot_iterations=model_config["slot_iterations"],
+                dropout=model_config["dropout"],
+                minimum_instance_area=model_config["minimum_instance_area"],
             )
         return AffinityGuidedMLPNet(
             in_channels=model_config["input_channels"],

@@ -37,6 +37,10 @@ model:
   num_slots: 32
   mlp_channels: [64, 32]
   use_aggregation: true
+  recurrent_hidden_channels: 32
+  recurrent_iterations: 3
+  slot_iterations: 2
+  minimum_instance_area: 0
 
 optimizer:
   type: AdamW

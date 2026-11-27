@@ -58,6 +58,10 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "num_slots": 32,
         "mlp_channels": [64, 32],
         "use_aggregation": True,
+        "recurrent_hidden_channels": 32,
+        "recurrent_iterations": 3,
+        "slot_iterations": 2,
+        "minimum_instance_area": 0,
     },
     "optimizer": {
         "type": "AdamW",
@@ -102,6 +106,14 @@ FLAT_OVERRIDE_SECTIONS = {
     "num_slots": "model",
     "mlp_channels": "model",
     "use_aggregation": "model",
+    "recurrent_hidden_channels": "model",
+    "recurrent_iterations": "model",
+    "recurrent_hidden_dim": "model",
+    "hidden_channels": "model",
+    "slot_iterations": "model",
+    "minimum_instance_area": "model",
+    "num_recurrent_iterations": "model",
+    "slot_update_iterations": "model",
     "optimizer_type": "optimizer",
     "learning_rate": "optimizer",
     "weight_decay": "optimizer",
@@ -236,12 +248,31 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
     if model["model_name"] not in {
         "affinity_guided_mlp",
+        "affinity_guided_recurrent",
+        "affinity_guided_recurrent_instance_segmentation",
+        "affinity_guided_recurrent_net",
+        "affinity_guided_recurrent_unet",
         "instanseg_unet",
         "semantic_unet",
     }:
         raise ValueError(f"Unsupported model_name: {model['model_name']!r}")
     for key in ("num_classes", "input_channels", "feature_channels", "num_slots"):
         _require_int(model[key], key, 1)
+    if "recurrent_hidden_dim" in model:
+        model["recurrent_hidden_channels"] = model.pop("recurrent_hidden_dim")
+    if "hidden_channels" in model:
+        model["recurrent_hidden_channels"] = model.pop("hidden_channels")
+    if "num_recurrent_iterations" in model:
+        model["recurrent_iterations"] = model.pop("num_recurrent_iterations")
+    if "slot_update_iterations" in model:
+        model["slot_iterations"] = model.pop("slot_update_iterations")
+    for key in (
+        "recurrent_hidden_channels",
+        "recurrent_iterations",
+        "slot_iterations",
+    ):
+        _require_int(model[key], key, 1)
+    _require_int(model["minimum_instance_area"], "minimum_instance_area", 0)
     _require_int(model["freeze_backbone_epochs"], "freeze_backbone_epochs", 0)
     _require_finite(model["dropout"], "dropout", 0.0, 1.0)
     if model["dropout"] == 1:

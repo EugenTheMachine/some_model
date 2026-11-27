@@ -13,7 +13,11 @@ from src.dataset.utils import load_dataset_splits
 from src.model.head import AffinityGuidedAggregation
 from src.model.eval import InstanceSegmentationMetrics
 from src.model.loss import AffinityGuidedLoss, build_affinity_targets
-from src.model.model import AffinityGuidedMLPNet, InstanSegModel
+from src.model.model import (
+    AffinityGuidedMLPNet,
+    AffinityGuidedRecurrentNet,
+    InstanSegModel,
+)
 from src.model.semantic import SemanticSegmentationLoss, SemanticSegmentationUNet
 from src.model.train import train_epoch
 from src.model.utils import load_config
@@ -74,6 +78,33 @@ def test_model_forward_and_assignment_loss_backpropagate_to_affinity_head():
     affinity_gradient = model.head.affinity_head[-1].weight.grad
     assert affinity_gradient is not None
     assert torch.count_nonzero(affinity_gradient) > 0
+
+
+def test_recurrent_model_forward_and_loss_backpropagate():
+    """Recurrent grouping and slot updates produce dense trainable assignments."""
+    model = AffinityGuidedRecurrentNet(
+        in_channels=1,
+        backbone_channels=(4, 8, 12, 16, 20),
+        feature_channels=4,
+        num_slots=3,
+        recurrent_hidden_channels=4,
+        recurrent_iterations=2,
+        slot_iterations=2,
+    )
+    images = torch.randn(2, 1, 32, 32)
+    labels = torch.zeros(2, 1, 32, 32, dtype=torch.int32)
+    labels[:, :, 4:14, 4:14] = 4
+    labels[:, :, 18:28, 18:28] = 9
+
+    outputs = model(images)
+    loss = AffinityGuidedLoss()(outputs, labels)
+    loss.backward()
+
+    assert outputs["recurrent_features"].shape == (2, 4, 32, 32)
+    assert outputs["slot_embeddings"].shape == (2, 3, 4)
+    assert outputs["assignment_logits"].shape == (2, 4, 32, 32)
+    assert outputs["instance_map"].shape == (2, 32, 32)
+    assert model.head.affinity_head[-1].weight.grad is not None
 
 
 def test_dataset_preloads_and_collates_padded_instance_masks():
