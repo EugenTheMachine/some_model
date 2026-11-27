@@ -10,13 +10,18 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 from torch import nn
 
 from .decoder import Decoder, UNetDecoderFeatures
 from .encoder import UNetEncoder
-from .head import AffinityGuidedRecurrentHead, InstanceSegmentationHead
+from .head import (
+    AffinityGuidedRecurrentHead,
+    DiscriminativeEmbeddingLearnedAssignmentHead,
+    InstanceSegmentationHead,
+)
 from .semantic import (
     SemanticSegmentationLoss,
     SemanticSegmentationUNet,
@@ -100,6 +105,46 @@ class AffinityGuidedMLPNet(nn.Module):
             raise TypeError("Model input must be a floating-point tensor.")
         features = self.backbone(inputs)
         return self.head(features)
+
+    @torch.no_grad()
+    def predict_instances(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Return background ID 0 and positive slot IDs for a batch."""
+        self.eval()
+        return self(inputs)["instance_map"]
+
+
+class DiscriminativeEmbeddingLearnedAssignmentNet(nn.Module):
+    """U-Net instance segmentation with embeddings and learned slot assignment."""
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        backbone_channels: Sequence[int] = (64, 128, 256, 512, 1024),
+        num_slots: int = 32,
+        embedding_dim: int = 8,
+        assignment_dim: int = 64,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.backbone = UNetBackbone(
+            in_channels=in_channels,
+            channels=backbone_channels,
+            dropout=dropout,
+        )
+        self.head = DiscriminativeEmbeddingLearnedAssignmentHead(
+            in_channels=self.backbone.out_channels,
+            num_slots=num_slots,
+            embedding_dim=embedding_dim,
+            assignment_dim=assignment_dim,
+        )
+
+    def forward(self, inputs: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return full-resolution DELA predictions and instance assignments."""
+        if inputs.ndim != 4:
+            raise ValueError("Model input must have shape (N, C, H, W).")
+        if not inputs.is_floating_point():
+            raise TypeError("Model input must be a floating-point tensor.")
+        return self.head(self.backbone(inputs))
 
     @torch.no_grad()
     def predict_instances(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -336,6 +381,18 @@ class InstanSegModel:
                 channels=model_config["unet_channels"],
             )
         if model_config["model_name"] in {
+            "dela_net",
+            "discriminative_embedding_learned_assignment",
+        }:
+            return DiscriminativeEmbeddingLearnedAssignmentNet(
+                in_channels=model_config["input_channels"],
+                backbone_channels=model_config["backbone_channels"],
+                num_slots=model_config["num_slots"],
+                embedding_dim=model_config["embedding_dim"],
+                assignment_dim=model_config["assignment_dim"],
+                dropout=model_config["dropout"],
+            )
+        if model_config["model_name"] in {
             "affinity_guided_recurrent",
             "affinity_guided_recurrent_instance_segmentation",
             "affinity_guided_recurrent_net",
@@ -458,11 +515,18 @@ class InstanSegModel:
     def train(self, **overrides: Any) -> list[dict[str, Any]]:
         """Run the full configured training experiment."""
         from .eval import InstanceSegmentationMetrics, eval_epoch
-        from .loss import AffinityGuidedLoss
+        from .loss import (
+            AffinityGuidedLoss,
+            DiscriminativeEmbeddingLearnedAssignmentLoss,
+        )
         from .train import train_epoch
 
         config = self._load_effective_config(overrides)
         semantic_mode = config["model"]["model_name"] == "semantic_unet"
+        dela_mode = config["model"]["model_name"] in {
+            "dela_net",
+            "discriminative_embedding_learned_assignment",
+        }
         seed_everything(config["preprocessing"]["seed"])
         if config["meta"]["experiment_name"] is None:
             config["meta"]["experiment_name"] = generated_experiment_name()
@@ -485,17 +549,47 @@ class InstanSegModel:
             len(split_data["val"][0]),
             len(split_data["test"][0]),
         )
+        if dela_mode:
+            instance_counts = [
+                int(np.unique(mask[mask > 0]).size)
+                for mask in split_data["train"][1]
+            ]
+            slot_capacity = config["model"]["num_slots"]
+            over_capacity = sum(
+                count > slot_capacity for count in instance_counts
+            )
+            self.logger.info(
+                "DELA slot capacity K=%d; training instance counts "
+                "p50=%.1f p99=%.1f max=%d; over-capacity images=%d/%d (%.4f)",
+                slot_capacity,
+                np.percentile(instance_counts, 50),
+                np.percentile(instance_counts, 99),
+                max(instance_counts),
+                over_capacity,
+                len(instance_counts),
+                over_capacity / len(instance_counts),
+            )
+            if over_capacity:
+                raise ValueError(
+                    f"DELA slot capacity K={slot_capacity} is below the "
+                    f"instance count in {over_capacity}/{len(instance_counts)} "
+                    "training images. Increase num_slots or use a documented "
+                    "tiling strategy; ground-truth instances are never truncated."
+                )
         loaders, generators = self._make_loaders(
             config, datasets, training=True
         )
         self.logger.info("Data loaders and preprocessing initialized.")
 
         self.model = self._build_model(config).to(self.device)
-        loss_fn = (
-            SemanticSegmentationLoss()
-            if semantic_mode
-            else AffinityGuidedLoss()
-        )
+        if semantic_mode:
+            loss_fn = SemanticSegmentationLoss()
+        elif dela_mode:
+            loss_fn = DiscriminativeEmbeddingLearnedAssignmentLoss(
+                matched_mask_weight=config["model"]["matched_mask_weight"]
+            )
+        else:
+            loss_fn = AffinityGuidedLoss()
         base_lr = config["optimizer"]["learning_rate"]
         backbone = getattr(self.model, "backbone", None)
         backbone_parameters = list(backbone.parameters()) if backbone else []
@@ -751,7 +845,10 @@ class InstanSegModel:
     def eval(self, subset: str = "test", **overrides: Any) -> dict[str, float]:
         """Evaluate one supported split without modifying training artifacts."""
         from .eval import InstanceSegmentationMetrics, eval_epoch
-        from .loss import AffinityGuidedLoss
+        from .loss import (
+            AffinityGuidedLoss,
+            DiscriminativeEmbeddingLearnedAssignmentLoss,
+        )
 
         if subset not in {"val", "test"}:
             raise ValueError("subset must be either 'val' or 'test'.")
@@ -782,11 +879,21 @@ class InstanSegModel:
                 progress_description=subset.capitalize(),
             )
         else:
+            dela_mode = config["model"]["model_name"] in {
+                "dela_net",
+                "discriminative_embedding_learned_assignment",
+            }
             results = eval_epoch(
                 self.model,
                 self.device,
                 loaders[subset],
-                AffinityGuidedLoss(),
+                (
+                    DiscriminativeEmbeddingLearnedAssignmentLoss(
+                        matched_mask_weight=config["model"]["matched_mask_weight"]
+                    )
+                    if dela_mode
+                    else AffinityGuidedLoss()
+                ),
                 InstanceSegmentationMetrics(),
                 amp=amp_enabled,
                 progress_description=subset.capitalize(),

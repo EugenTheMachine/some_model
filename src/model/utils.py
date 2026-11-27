@@ -56,6 +56,9 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "unet_channels": [32, 64, 128, 256, 512],
         "feature_channels": 32,
         "num_slots": 32,
+        "embedding_dim": 8,
+        "assignment_dim": 64,
+        "matched_mask_weight": 0.0,
         "mlp_channels": [64, 32],
         "use_aggregation": True,
         "recurrent_hidden_channels": 32,
@@ -104,6 +107,9 @@ FLAT_OVERRIDE_SECTIONS = {
     "unet_channels": "model",
     "feature_channels": "model",
     "num_slots": "model",
+    "embedding_dim": "model",
+    "assignment_dim": "model",
+    "matched_mask_weight": "model",
     "mlp_channels": "model",
     "use_aggregation": "model",
     "recurrent_hidden_channels": "model",
@@ -247,6 +253,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
         _require_int(training["length_of_epoch"], "length_of_epoch", 1)
 
     if model["model_name"] not in {
+        "dela_net",
+        "discriminative_embedding_learned_assignment",
         "affinity_guided_mlp",
         "affinity_guided_recurrent",
         "affinity_guided_recurrent_instance_segmentation",
@@ -256,8 +264,16 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "semantic_unet",
     }:
         raise ValueError(f"Unsupported model_name: {model['model_name']!r}")
-    for key in ("num_classes", "input_channels", "feature_channels", "num_slots"):
+    for key in (
+        "num_classes",
+        "input_channels",
+        "feature_channels",
+        "num_slots",
+        "embedding_dim",
+        "assignment_dim",
+    ):
         _require_int(model[key], key, 1)
+    _require_finite(model["matched_mask_weight"], "matched_mask_weight", 0.0)
     if "recurrent_hidden_dim" in model:
         model["recurrent_hidden_channels"] = model.pop("recurrent_hidden_dim")
     if "hidden_channels" in model:

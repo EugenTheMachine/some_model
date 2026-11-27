@@ -10,16 +10,23 @@ import kaggle_train
 from src.dataset.augmentations import Augmentations
 from src.dataset.dataset import Segmentation_Dataset, collate_fn
 from src.dataset.utils import load_dataset_splits
-from src.model.head import AffinityGuidedAggregation, RecurrentSlotGrouping
+from src.model.head import (
+    AffinityGuidedAggregation,
+    RecurrentSlotGrouping,
+)
 from src.model.eval import InstanceSegmentationMetrics
 from src.model.loss import (
     AffinityGuidedLoss,
+    DiscriminativeEmbeddingLearnedAssignmentLoss,
     build_affinity_targets,
     build_assignment_targets,
+    build_dela_affinity_targets,
+    discriminative_embedding_loss,
 )
 from src.model.model import (
     AffinityGuidedMLPNet,
     AffinityGuidedRecurrentNet,
+    DiscriminativeEmbeddingLearnedAssignmentNet,
     InstanSegModel,
 )
 from src.model.semantic import SemanticSegmentationLoss, SemanticSegmentationUNet
@@ -59,6 +66,89 @@ def test_affinity_targets_ignore_pairs_touching_ignored_pixels():
     assert targets[0, 0, 1, 1] == 0
     assert valid[0, 0, 1, 0]
     assert targets[0, 0, 1, 0] == 0
+
+
+def test_dela_affinities_only_supervise_foreground_pairs():
+    labels = torch.tensor([[[1, 1, 0], [1, -1, 2]]], dtype=torch.int32)
+
+    targets, valid = build_dela_affinity_targets(labels)
+
+    assert valid[0, 0, 0, 0]
+    assert targets[0, 0, 0, 0] == 1
+    assert not valid[0, 0, 0, 1]
+    assert not valid[0, 0, 1, 1]
+    assert valid[0, 1, 0, 0]
+    assert targets[0, 1, 0, 0] == 1
+
+
+def test_embedding_loss_is_id_invariant_and_safe_for_single_instance():
+    embeddings = torch.zeros((1, 3, 4, 4))
+    embeddings[:, 0] = 1
+    labels = torch.ones((1, 4, 4), dtype=torch.int32)
+
+    pull, push = discriminative_embedding_loss(embeddings, labels)
+    remapped_pull, remapped_push = discriminative_embedding_loss(
+        embeddings, labels * 37
+    )
+
+    assert pull.item() == pytest.approx(0.0)
+    assert push.item() == 0
+    assert remapped_pull.item() == pytest.approx(pull.item())
+    assert remapped_push.item() == pytest.approx(push.item())
+
+
+def test_dela_loss_ignores_fully_invalid_label_maps():
+    assignment_logits = torch.randn(1, 3, 4, 4, requires_grad=True)
+    outputs = {
+        "foreground_logits": torch.randn(1, 1, 4, 4, requires_grad=True),
+        "affinity_logits": torch.randn(1, 4, 4, 4, requires_grad=True),
+        "pixel_embeddings": torch.randn(1, 3, 4, 4, requires_grad=True),
+        "assignment_logits": assignment_logits,
+        "assignment_probs": assignment_logits.softmax(dim=1),
+    }
+
+    loss = DiscriminativeEmbeddingLearnedAssignmentLoss()(
+        outputs, torch.full((1, 1, 4, 4), -1, dtype=torch.int32)
+    )
+
+    assert torch.isfinite(loss)
+    assert loss.item() == 0
+
+
+def test_dela_forward_and_combined_loss_backpropagate_to_all_heads():
+    model = DiscriminativeEmbeddingLearnedAssignmentNet(
+        in_channels=1,
+        backbone_channels=(4, 8, 12, 16, 20),
+        num_slots=3,
+        embedding_dim=4,
+        assignment_dim=8,
+    )
+    images = torch.randn(2, 1, 32, 32)
+    labels = torch.zeros(2, 1, 32, 32, dtype=torch.int32)
+    labels[:, :, 4:14, 4:14] = 4
+    labels[:, :, 18:28, 18:28] = 9
+
+    outputs = model(images)
+    loss_fn = DiscriminativeEmbeddingLearnedAssignmentLoss(
+        matched_mask_weight=0.5
+    )
+    loss = loss_fn(outputs, labels)
+    loss.backward()
+
+    assert outputs["foreground_logits"].shape == (2, 1, 32, 32)
+    assert outputs["affinity_logits"].shape == (2, 4, 32, 32)
+    assert outputs["pixel_embeddings"].shape == (2, 4, 32, 32)
+    assert outputs["assignment_logits"].shape == (2, 4, 32, 32)
+    assert outputs["instance_map"].shape == (2, 32, 32)
+    assert loss_fn.last_components["matched_mask_loss"] > 0
+    for parameter in (
+        model.head.foreground_head[-1].weight,
+        model.head.affinity_head[-1].weight,
+        model.head.embedding_head[-1].weight,
+        model.head.slot_embeddings,
+    ):
+        assert parameter.grad is not None
+        assert torch.count_nonzero(parameter.grad) > 0
 
 
 def test_aggregation_uses_reverse_edge_affinity_at_neighbor():
@@ -439,6 +529,32 @@ def test_facade_trains_saves_and_evaluates(tmp_path, monkeypatch):
 
     assert len(semantic_history) == 1
     assert {"loss", "pixel_accuracy", "dice", "iou"} <= semantic_result.keys()
+
+    dela_facade = InstanSegModel(
+        data_dir=str(data_dir),
+        experiment_name="dela-integration",
+        imgsz=32,
+        batch_size=1,
+        epochs=1,
+        warmup_epochs=0,
+        val_ratio=0.0,
+        test_ratio=0.0,
+        num_workers=0,
+        input_channels=1,
+        dim_in=1,
+        model_name="dela_net",
+        backbone_channels=[4, 8, 12, 16, 20],
+        num_slots=2,
+        embedding_dim=4,
+        assignment_dim=8,
+    )
+    dela_history = dela_facade.train()
+
+    assert len(dela_history) == 1
+    assert isinstance(
+        dela_facade.model, DiscriminativeEmbeddingLearnedAssignmentNet
+    )
+    assert (tmp_path / "runs" / "dela-integration" / "last.pt").is_file()
 
 
 def test_kaggle_staging_copies_only_notebook_and_metadata(tmp_path):

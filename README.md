@@ -9,6 +9,13 @@ argmax without clustering or connected-component post-processing.
 It also includes `affinity_guided_recurrent`, which adds affinity-gated
 ConvGRU message passing and recurrent slot refinement before dense assignment.
 
+The `dela_net` model adds normalized discriminative pixel embeddings and a
+learned, image-conditioned slot assignment head. It uses Hungarian matching
+only during training, with inference producing instance IDs through the
+assignment argmax. Configure `num_slots` for the training set; training reports
+the instance-count distribution and fails explicitly rather than truncating
+images that exceed slot capacity.
+
 It also provides a classical U-Net binary semantic-segmentation baseline.
 Select `model_name="semantic_unet"` and configure `unet_channels` to train it
 through the same data-loading and checkpointing facade. In this mode, all

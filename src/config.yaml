@@ -35,6 +35,9 @@ model:
   backbone_channels: [64, 128, 256, 512, 1024]
   feature_channels: 32
   num_slots: 32
+  embedding_dim: 8
+  assignment_dim: 64
+  matched_mask_weight: 0.0
   mlp_channels: [64, 32]
   use_aggregation: true
   recurrent_hidden_channels: 32

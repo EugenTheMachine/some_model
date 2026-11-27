@@ -197,6 +197,108 @@ class InstanceSegmentationHead(nn.Module):
         }
 
 
+class DiscriminativeEmbeddingLearnedAssignmentHead(nn.Module):
+    """Predict embeddings and assign pixels to image-conditioned instance slots."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        num_slots: int = 32,
+        embedding_dim: int = 8,
+        assignment_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        if min(in_channels, num_slots, embedding_dim, assignment_dim) <= 0:
+            raise ValueError("DELA head dimensions must be positive.")
+        self.num_slots = num_slots
+        self.foreground_head = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2 or 1, 3, padding=1),
+            nn.BatchNorm2d(in_channels // 2 or 1),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(in_channels // 2 or 1, 1, 1),
+        )
+        self.affinity_head = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2 or 1, 3, padding=1),
+            nn.BatchNorm2d(in_channels // 2 or 1),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(
+                in_channels // 2 or 1, len(AFFINITY_OFFSETS), 1
+            ),
+        )
+        self.embedding_head = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2 or 1, 3, padding=1),
+            nn.BatchNorm2d(in_channels // 2 or 1),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(in_channels // 2 or 1, embedding_dim, 1),
+        )
+        self.assignment_projection = nn.Sequential(
+            nn.Conv2d(
+                in_channels + embedding_dim + 1 + len(AFFINITY_OFFSETS),
+                assignment_dim,
+                kernel_size=1,
+            ),
+            nn.ReLU(inplace=False),
+        )
+        self.slot_embeddings = nn.Parameter(
+            torch.empty(num_slots, assignment_dim)
+        )
+        nn.init.normal_(self.slot_embeddings, std=0.02)
+        self.context_projection = nn.Linear(assignment_dim, assignment_dim)
+        self.pixel_projection = nn.Conv2d(
+            assignment_dim, assignment_dim, kernel_size=1
+        )
+        self.slot_projection = nn.Linear(assignment_dim, assignment_dim)
+        self.background_classifier = nn.Conv2d(assignment_dim, 1, 1)
+
+    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return foreground, affinity, embedding, and slot-assignment predictions."""
+        foreground_logits = self.foreground_head(features)
+        affinity_logits = self.affinity_head(features)
+        foreground_probs = foreground_logits.sigmoid()
+        affinity_probs = affinity_logits.sigmoid()
+        pixel_embeddings = F.normalize(
+            self.embedding_head(features), p=2, dim=1, eps=1e-8
+        )
+        assignment_features = self.assignment_projection(
+            torch.cat(
+                (
+                    features,
+                    pixel_embeddings,
+                    foreground_probs,
+                    affinity_probs,
+                ),
+                dim=1,
+            )
+        )
+        context = assignment_features.mean(dim=(-2, -1))
+        slots = self.slot_embeddings.unsqueeze(0) + self.context_projection(
+            context
+        ).unsqueeze(1)
+        pixels = self.pixel_projection(assignment_features).flatten(2)
+        projected_slots = self.slot_projection(slots)
+        slot_logits = torch.bmm(projected_slots, pixels) / (
+            projected_slots.shape[-1] ** 0.5
+        )
+        slot_logits = slot_logits.reshape(
+            features.shape[0], self.num_slots, *features.shape[-2:]
+        )
+        assignment_logits = torch.cat(
+            (self.background_classifier(assignment_features), slot_logits),
+            dim=1,
+        )
+        return {
+            "foreground_logits": foreground_logits,
+            "foreground_probs": foreground_probs,
+            "affinity_logits": affinity_logits,
+            "affinity_probs": affinity_probs,
+            "pixel_embeddings": pixel_embeddings,
+            "assignment_features": assignment_features,
+            "assignment_logits": assignment_logits,
+            "assignment_probs": F.softmax(assignment_logits, dim=1),
+            "instance_map": assignment_logits.argmax(dim=1),
+        }
+
+
 class SpatialConvGRU(nn.Module):
     """Shared spatial GRU cell used for recurrent affinity message passing."""
 
