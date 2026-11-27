@@ -23,6 +23,7 @@ TOKEN_PATH = PROJECT_ROOT / "kaggle_token.txt"
 GPU_ACCELERATOR = "NvidiaTeslaT4"
 POLL_INTERVAL_SECONDS = 60
 MONITOR_TIMEOUT_SECONDS = 1800
+KERNEL_STARTUP_TIMEOUT_SECONDS = 300
 LOG_TAIL_LINES = 100
 
 
@@ -190,11 +191,15 @@ def push_notebook(environment: dict[str, str]) -> None:
             print(result.stdout.strip(), flush=True)
 
 
-def get_kernel_status(environment: dict[str, str], kernel_id: str) -> str:
-    """Return Kaggle's current status for the configured kernel."""
-    result = run_kaggle_command(
-        ["kernels", "status", kernel_id], environment
-    )
+def get_kernel_status(environment: dict[str, str], kernel_id: str) -> str | None:
+    """Return status, or None when Kaggle has no session for the kernel yet."""
+    try:
+        result = run_kaggle_command(["kernels", "status", kernel_id], environment)
+    except RuntimeError as error:
+        details = str(error).lower()
+        if "404" in details and "not found" in details:
+            return None
+        raise
     status = result.stdout.strip()
     if not status:
         raise RuntimeError(f"Kaggle returned an empty status for {kernel_id}.")
@@ -231,13 +236,40 @@ def monitor_kernel(
     *,
     poll_interval: int = POLL_INTERVAL_SECONDS,
     timeout: int = MONITOR_TIMEOUT_SECONDS,
+    wait_for_startup: bool = False,
+    startup_timeout: int = KERNEL_STARTUP_TIMEOUT_SECONDS,
 ) -> bool:
     """Wait for kernel completion, failure, or timeout."""
-    if poll_interval <= 0 or timeout <= 0:
-        raise ValueError("Poll interval and timeout must be greater than zero.")
+    if poll_interval <= 0 or timeout <= 0 or startup_timeout <= 0:
+        raise ValueError("Polling and timeout values must be greater than zero.")
     started_at = time.monotonic()
     while True:
         status = get_kernel_status(environment, kernel_id)
+        elapsed = time.monotonic() - started_at
+        if status is None:
+            if not wait_for_startup:
+                print(
+                    f"No Kaggle execution session was found for {kernel_id}. "
+                    "Check the owner/kernel slug or push a kernel version first.",
+                    file=sys.stderr,
+                )
+                return False
+            startup_deadline = min(timeout, startup_timeout)
+            if elapsed >= startup_deadline:
+                print(
+                    "Kaggle has not created an execution session for "
+                    f"{kernel_id} within {startup_deadline} seconds. "
+                    "Check the kernel slug and the result of `kaggle kernels push`.",
+                    file=sys.stderr,
+                )
+                return False
+            print(
+                f"[{time.strftime('%H:%M:%S')}] No execution session yet; "
+                "waiting for Kaggle to start the pushed version.",
+                flush=True,
+            )
+            time.sleep(min(poll_interval, startup_deadline - elapsed))
+            continue
         print(f"[{time.strftime('%H:%M:%S')}] Status: {status}", flush=True)
         normalized_status = status.upper()
         if "COMPLETE" in normalized_status and "RUNNING" not in normalized_status:
@@ -314,6 +346,7 @@ def main() -> int:
             metadata["id"],
             poll_interval=args.poll_interval,
             timeout=args.timeout,
+            wait_for_startup=not args.no_push,
         )
     )
 

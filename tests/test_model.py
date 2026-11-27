@@ -325,3 +325,50 @@ def test_kaggle_notebook_validation_rejects_invalid_python(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid Python in notebook cell"):
         kaggle_train.validate_notebook(notebook_path)
+
+
+def test_kaggle_status_404_is_reported_as_missing_session(monkeypatch):
+    """A missing session is distinguishable from other Kaggle CLI errors."""
+    def raise_not_found(*_args, **_kwargs):
+        raise RuntimeError(
+            "Kaggle command failed with exit code 1: "
+            "404 Client Error: Not Found for GetKernelSessionStatus"
+        )
+
+    monkeypatch.setattr(kaggle_train, "run_kaggle_command", raise_not_found)
+
+    assert kaggle_train.get_kernel_status({}, "owner/kernel") is None
+
+
+def test_kaggle_monitor_retries_404_after_push(monkeypatch):
+    """A newly pushed kernel can start after initial status checks return 404."""
+    statuses = iter([None, "RUNNING", "COMPLETE"])
+    monkeypatch.setattr(
+        kaggle_train,
+        "get_kernel_status",
+        lambda *_args: next(statuses),
+    )
+    monkeypatch.setattr(kaggle_train.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        kaggle_train, "fetch_and_display_logs", lambda *_args: None
+    )
+
+    assert kaggle_train.monitor_kernel(
+        {},
+        "owner/kernel",
+        poll_interval=1,
+        timeout=30,
+        wait_for_startup=True,
+    )
+
+
+def test_kaggle_monitor_explains_404_without_waiting_for_a_push(capsys, monkeypatch):
+    """Monitoring without a push reports absent sessions immediately."""
+    monkeypatch.setattr(
+        kaggle_train, "get_kernel_status", lambda *_args: None
+    )
+
+    assert not kaggle_train.monitor_kernel({}, "owner/kernel")
+    assert "Check the owner/kernel slug or push a kernel version first" in (
+        capsys.readouterr().err
+    )
