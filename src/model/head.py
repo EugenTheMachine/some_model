@@ -389,11 +389,20 @@ class RecurrentSlotGrouping(nn.Module):
             ) / scale
             assignment_weights = compatibility.softmax(dim=-1)
             foreground_weights = foreground_probs.flatten(2).transpose(1, 2)
-            weighted = assignment_weights * foreground_weights
+            with torch.autocast(
+                device_type=recurrent_features.device.type,
+                enabled=False,
+            ):
+                weighted = (
+                    assignment_weights.float() * foreground_weights.float()
+                )
+                normalized_weights = weighted / weighted.sum(
+                    dim=1, keepdim=True
+                ).clamp_min(self.epsilon)
             slot_updates = torch.bmm(
-                weighted.transpose(1, 2),
+                normalized_weights.transpose(1, 2),
                 values,
-            ) / (weighted.sum(dim=1).unsqueeze(-1) + self.epsilon)
+            )
             slots = self.slot_gru(
                 slot_updates.reshape(batch_size * self.num_slots, channels),
                 slots.reshape(batch_size * self.num_slots, channels),

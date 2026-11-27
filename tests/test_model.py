@@ -10,7 +10,7 @@ import kaggle_train
 from src.dataset.augmentations import Augmentations
 from src.dataset.dataset import Segmentation_Dataset, collate_fn
 from src.dataset.utils import load_dataset_splits
-from src.model.head import AffinityGuidedAggregation
+from src.model.head import AffinityGuidedAggregation, RecurrentSlotGrouping
 from src.model.eval import InstanceSegmentationMetrics
 from src.model.loss import (
     AffinityGuidedLoss,
@@ -140,6 +140,38 @@ def test_recurrent_model_forward_and_loss_backpropagate():
     assert outputs["assignment_logits"].shape == (2, 4, 32, 32)
     assert outputs["instance_map"].shape == (2, 32, 32)
     assert model.head.affinity_head[-1].weight.grad is not None
+
+
+def test_slot_updates_remain_finite_for_dominant_slot_under_amp():
+    """Normalize pixel weights before FP16 aggregation to avoid overflow."""
+    grouping = RecurrentSlotGrouping(
+        pixel_channels=1, num_slots=2, slot_iterations=1
+    )
+    with torch.no_grad():
+        grouping.query.weight.fill_(1)
+        grouping.query.bias.zero_()
+        grouping.key.weight.fill_(1)
+        grouping.key.bias.zero_()
+        grouping.value.weight.fill_(1)
+        grouping.value.bias.zero_()
+        grouping.slot_embeddings[0, 0, 0] = 100
+        grouping.slot_embeddings[0, 1, 0] = -100
+
+    updates: list[torch.Tensor] = []
+    hook = grouping.slot_gru.register_forward_pre_hook(
+        lambda _module, args: updates.append(args[0].detach())
+    )
+    features = torch.ones(1, 1, 256, 256)
+    foreground = torch.ones(1, 1, 256, 256)
+    try:
+        with torch.autocast(device_type="cpu", dtype=torch.float16):
+            outputs = grouping(features, foreground)
+    finally:
+        hook.remove()
+
+    assert len(updates) == 1
+    assert torch.isfinite(updates[0]).all()
+    assert torch.isfinite(outputs["assignment_probs"]).all()
 
 
 def test_hungarian_matching_is_finite_for_saturated_half_probabilities():
