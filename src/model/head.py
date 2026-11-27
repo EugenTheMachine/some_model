@@ -47,17 +47,32 @@ class AffinityGuidedAggregation(nn.Module):
         self.epsilon = epsilon
 
     def forward(
-        self, features: torch.Tensor, affinities: torch.Tensor
+        self,
+        features: torch.Tensor,
+        affinities: torch.Tensor,
+        foreground_probs: torch.Tensor,
     ) -> torch.Tensor:
         """Return the single affinity-weighted neighbor feature aggregate."""
-        if features.ndim != 4 or affinities.ndim != 4:
-            raise ValueError("Features and affinities must be NCHW tensors.")
+        if (
+            features.ndim != 4
+            or affinities.ndim != 4
+            or foreground_probs.ndim != 4
+        ):
+            raise ValueError(
+                "Features, affinities, and foreground must be NCHW tensors."
+            )
         if affinities.shape[1] != len(AFFINITY_OFFSETS):
             raise ValueError("Affinity tensor must have exactly four channels.")
+        if foreground_probs.shape[1] != 1:
+            raise ValueError("Foreground probabilities must have exactly one channel.")
         if features.shape[0] != affinities.shape[0]:
             raise ValueError("Feature and affinity batch sizes must match.")
+        if features.shape[0] != foreground_probs.shape[0]:
+            raise ValueError("Feature and foreground batch sizes must match.")
         if features.shape[-2:] != affinities.shape[-2:]:
             raise ValueError("Feature and affinity spatial dimensions must match.")
+        if features.shape[-2:] != foreground_probs.shape[-2:]:
+            raise ValueError("Feature and foreground spatial dimensions must match.")
 
         weights = affinities.sigmoid()
         numerator = torch.zeros_like(features)
@@ -67,11 +82,20 @@ class AffinityGuidedAggregation(nn.Module):
             forward_features, forward_valid = _shift(features, dy, dx)
             reverse_features, reverse_valid = _shift(features, -dy, -dx)
             reverse_affinity, _ = _shift(affinity, -dy, -dx)
+            forward_foreground, _ = _shift(foreground_probs, dy, dx)
+            reverse_foreground, _ = _shift(foreground_probs, -dy, -dx)
             forward_mask = forward_valid[None, None].to(features.dtype)
             reverse_mask = reverse_valid[None, None].to(features.dtype)
 
-            forward_weight = affinity * forward_mask
-            reverse_weight = reverse_affinity * reverse_mask
+            forward_weight = (
+                affinity * foreground_probs * forward_foreground * forward_mask
+            )
+            reverse_weight = (
+                reverse_affinity
+                * foreground_probs
+                * reverse_foreground
+                * reverse_mask
+            )
             numerator = (
                 numerator
                 + forward_features * forward_weight
@@ -133,7 +157,9 @@ class InstanceSegmentationHead(nn.Module):
         affinity_probs = affinity_logits.sigmoid()
         projected = self.feature_projection(features)
         if self.use_aggregation:
-            aggregated = self.aggregation(projected, affinity_logits)
+            aggregated = self.aggregation(
+                projected, affinity_logits, foreground_probs
+            )
             assignment_input = torch.cat(
                 (projected, aggregated, affinity_probs, foreground_probs), dim=1
             )

@@ -41,9 +41,24 @@ def test_affinity_targets_follow_right_down_diagonal_offsets():
     assert valid[0, 0, 0, 1]
     assert targets[0, 0, 0, 1] == 0
     assert not valid[0, 0, 0, 2]
+    assert valid[0, 1, 0, 0]
+    assert targets[0, 1, 0, 0] == 0
     assert targets[0, 1, 0, 2] == 1
     assert targets[0, 3, 0, 2] == 1
     assert not valid[0, 2, 1, 1]
+
+
+def test_affinity_targets_ignore_pairs_touching_ignored_pixels():
+    labels = torch.tensor([[[1, -1, 0], [1, 0, 0]]], dtype=torch.int32)
+
+    targets, valid = build_affinity_targets(labels)
+
+    assert not valid[0, 0, 0, 0]
+    assert not valid[0, 1, 0, 1]
+    assert valid[0, 0, 1, 1]
+    assert targets[0, 0, 1, 1] == 0
+    assert valid[0, 0, 1, 0]
+    assert targets[0, 0, 1, 0] == 0
 
 
 def test_aggregation_uses_reverse_edge_affinity_at_neighbor():
@@ -52,10 +67,26 @@ def test_aggregation_uses_reverse_edge_affinity_at_neighbor():
     affinity_logits = torch.full((1, 4, 1, 3), -20.0)
     affinity_logits[0, 0, 0, 0] = 20.0
 
-    aggregated = AffinityGuidedAggregation()(features, affinity_logits)
+    foreground_probs = torch.ones((1, 1, 1, 3))
+    aggregated = AffinityGuidedAggregation()(
+        features, affinity_logits, foreground_probs
+    )
 
     assert aggregated[0, 0, 0, 0].item() == pytest.approx(6.0, abs=1e-3)
     assert aggregated[0, 0, 0, 1].item() == pytest.approx(2.0, abs=1e-3)
+
+
+def test_aggregation_gates_edges_by_both_endpoint_foreground_probs():
+    features = torch.tensor([[[[2.0, 6.0, 10.0]]]])
+    affinity_logits = torch.full((1, 4, 1, 3), -20.0)
+    affinity_logits[0, 0, 0, 0] = 20.0
+    foreground_probs = torch.tensor([[[[1.0, 0.0, 1.0]]]])
+
+    aggregated = AffinityGuidedAggregation()(
+        features, affinity_logits, foreground_probs
+    )
+
+    assert torch.count_nonzero(aggregated) == 0
 
 
 def test_model_forward_and_assignment_loss_backpropagate_to_affinity_head():

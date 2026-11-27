@@ -300,7 +300,8 @@ are not intended to be clustered by DBSCAN or K-means.
 Affinity targets are derived directly from the instance label map.
 
 For each direction (d), define a valid-pair mask (V_d(p)), which is 1
-only when both (p) and (p+`\Delta`{=tex}\_d) are valid image pixels.
+only when both (p) and (p+`\Delta`{=tex}\_d) are in-image pixels with
+non-ignored labels.
 
 For valid pairs, define:
 
@@ -308,8 +309,8 @@ For valid pairs, define:
 ```{=tex}
 \begin{cases}
 1, & Y(p)=Y(p+\Delta_d)>0,\\
-0, & Y(p)\ne Y(p+\Delta_d),\\
-\text{ignored}, & Y(p)=0\text{ or }Y(p+\Delta_d)=0.
+0, & \text{otherwise for a valid pair},\\
+\text{ignored}, & \text{either endpoint has an ignored label}.
 \end{cases}
 ```
 \]
@@ -319,7 +320,7 @@ Thus:
 -   Neighboring pixels inside the same cell are positive affinity pairs.
 -   Neighboring pixels belonging to different cells are negative
     affinity pairs.
--   Pairs involving background are ignored in the affinity loss.
+-   Pairs involving background are valid negative affinity examples.
 -   Out-of-image pairs are ignored.
 
 The affinity loss must use the valid-pair mask. It must not treat

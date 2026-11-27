@@ -32,7 +32,7 @@ def build_foreground_targets(
 def build_affinity_targets(
     labels: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create same-instance targets and valid foreground pair masks."""
+    """Create same-instance targets and masks for non-ignored neighbor pairs."""
     label_map = _as_label_map(labels)
     batch_size, height, width = label_map.shape
     targets = torch.zeros(
@@ -50,12 +50,14 @@ def build_affinity_targets(
             y_start + dy : y_stop + dy,
             x_start + dx : x_stop + dx,
         ]
-        pair_valid = (source > 0) & (neighbor > 0)
+        pair_valid = (source >= 0) & (neighbor >= 0)
         target_view = targets[
             :, channel, y_start:y_stop, x_start:x_stop
         ]
         valid_view = valid[:, channel, y_start:y_stop, x_start:x_stop]
-        target_view.copy_((source == neighbor).to(dtype=torch.float32))
+        target_view.copy_(
+            ((source == neighbor) & (source > 0)).to(dtype=torch.float32)
+        )
         valid_view.copy_(pair_valid)
     return targets, valid
 

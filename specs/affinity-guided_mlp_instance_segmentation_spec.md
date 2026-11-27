@@ -526,7 +526,7 @@ Use BCE-with-logits plus Dice:
 
 ### 8.2 Affinity loss
 
-Use masked BCE-with-logits over valid foreground neighbor pairs:
+Use masked BCE-with-logits over valid, non-ignored neighbor pairs:
 
 \[
 \mathcal L_{\text{affinity}}=
@@ -538,7 +538,11 @@ Use masked BCE-with-logits over valid foreground neighbor pairs:
 }
 \]
 
-where \(M_{p,k}=1\) for valid foreground-foreground pairs and 0 otherwise.
+where \(M_{p,k}=1\) when both endpoints have non-ignored labels and 0
+otherwise. A pair is positive only when both endpoints belong to the same
+positive instance; foreground-background, background-background, and
+different-instance pairs are negative. Out-of-image and ignored-label pairs
+are excluded.
 
 Inspect the positive/negative balance separately for each direction. If imbalance is severe, test positive weighting or focal loss as an ablation rather than introducing it immediately.
 
