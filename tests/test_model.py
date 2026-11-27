@@ -89,6 +89,20 @@ def test_aggregation_gates_edges_by_both_endpoint_foreground_probs():
     assert torch.count_nonzero(aggregated) == 0
 
 
+def test_aggregation_accumulates_half_precision_features_in_float32():
+    features = torch.full((1, 1, 1, 3), 40000.0, dtype=torch.float16)
+    affinity_logits = torch.full((1, 4, 1, 3), 20.0, dtype=torch.float16)
+    foreground_probs = torch.ones((1, 1, 1, 3), dtype=torch.float16)
+
+    with torch.autocast(device_type="cpu", dtype=torch.float16):
+        aggregated = AffinityGuidedAggregation()(
+            features, affinity_logits, foreground_probs
+        )
+
+    assert torch.isfinite(aggregated).all()
+    assert torch.allclose(aggregated, features)
+
+
 def test_model_forward_and_assignment_loss_backpropagate_to_affinity_head():
     """Prediction tensors have expected shapes and assignment trains affinities."""
     model = AffinityGuidedMLPNet(

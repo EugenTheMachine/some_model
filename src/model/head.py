@@ -74,35 +74,43 @@ class AffinityGuidedAggregation(nn.Module):
         if features.shape[-2:] != foreground_probs.shape[-2:]:
             raise ValueError("Feature and foreground spatial dimensions must match.")
 
-        weights = affinities.sigmoid()
-        numerator = torch.zeros_like(features)
-        denominator = torch.zeros_like(affinities[:, :1])
-        for channel, (dy, dx) in enumerate(AFFINITY_OFFSETS):
-            affinity = weights[:, channel : channel + 1]
-            forward_features, forward_valid = _shift(features, dy, dx)
-            reverse_features, reverse_valid = _shift(features, -dy, -dx)
-            reverse_affinity, _ = _shift(affinity, -dy, -dx)
-            forward_foreground, _ = _shift(foreground_probs, dy, dx)
-            reverse_foreground, _ = _shift(foreground_probs, -dy, -dx)
-            forward_mask = forward_valid[None, None].to(features.dtype)
-            reverse_mask = reverse_valid[None, None].to(features.dtype)
+        with torch.autocast(device_type=features.device.type, enabled=False):
+            features_float = features.float()
+            foreground_float = foreground_probs.float()
+            weights = affinities.float().sigmoid()
+            numerator = torch.zeros_like(features_float)
+            denominator = torch.zeros_like(foreground_float)
+            for channel, (dy, dx) in enumerate(AFFINITY_OFFSETS):
+                affinity = weights[:, channel : channel + 1]
+                forward_features, forward_valid = _shift(
+                    features_float, dy, dx
+                )
+                reverse_features, reverse_valid = _shift(
+                    features_float, -dy, -dx
+                )
+                reverse_affinity, _ = _shift(affinity, -dy, -dx)
+                forward_foreground, _ = _shift(foreground_float, dy, dx)
+                reverse_foreground, _ = _shift(foreground_float, -dy, -dx)
+                forward_mask = forward_valid[None, None]
+                reverse_mask = reverse_valid[None, None]
 
-            forward_weight = (
-                affinity * foreground_probs * forward_foreground * forward_mask
-            )
-            reverse_weight = (
-                reverse_affinity
-                * foreground_probs
-                * reverse_foreground
-                * reverse_mask
-            )
-            numerator = (
-                numerator
-                + forward_features * forward_weight
-                + reverse_features * reverse_weight
-            )
-            denominator = denominator + forward_weight + reverse_weight
-        return numerator / (denominator + self.epsilon)
+                forward_weight = (
+                    affinity * foreground_float * forward_foreground * forward_mask
+                )
+                reverse_weight = (
+                    reverse_affinity
+                    * foreground_float
+                    * reverse_foreground
+                    * reverse_mask
+                )
+                numerator = (
+                    numerator
+                    + forward_features * forward_weight
+                    + reverse_features * reverse_weight
+                )
+                denominator = denominator + forward_weight + reverse_weight
+            aggregated = numerator / (denominator + self.epsilon)
+        return aggregated.to(dtype=features.dtype)
 
 
 class InstanceSegmentationHead(nn.Module):
