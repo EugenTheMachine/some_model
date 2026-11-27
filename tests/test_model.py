@@ -12,7 +12,11 @@ from src.dataset.dataset import Segmentation_Dataset, collate_fn
 from src.dataset.utils import load_dataset_splits
 from src.model.head import AffinityGuidedAggregation
 from src.model.eval import InstanceSegmentationMetrics
-from src.model.loss import AffinityGuidedLoss, build_affinity_targets
+from src.model.loss import (
+    AffinityGuidedLoss,
+    build_affinity_targets,
+    build_assignment_targets,
+)
 from src.model.model import (
     AffinityGuidedMLPNet,
     AffinityGuidedRecurrentNet,
@@ -105,6 +109,28 @@ def test_recurrent_model_forward_and_loss_backpropagate():
     assert outputs["assignment_logits"].shape == (2, 4, 32, 32)
     assert outputs["instance_map"].shape == (2, 32, 32)
     assert model.head.affinity_head[-1].weight.grad is not None
+
+
+def test_hungarian_matching_is_finite_for_saturated_half_probabilities():
+    """Mixed-precision softmax outputs remain safe for matching costs."""
+    logits = torch.tensor(
+        [
+            [
+                [[0.0, 0.0], [0.0, 0.0]],
+                [[20.0, 20.0], [-20.0, -20.0]],
+                [[-20.0, -20.0], [0.0, 20.0]],
+            ]
+        ]
+    )
+    probabilities = logits.softmax(dim=1).to(torch.float16)
+    labels = torch.tensor([[[1, 1], [0, 2]]], dtype=torch.int32)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        targets, matchings = build_assignment_targets(probabilities, labels)
+
+    assert len(matchings) == 1
+    assert len(matchings[0][0]) == 2
+    assert torch.unique(targets[0][labels[0] > 0]).numel() == 2
 
 
 def test_dataset_preloads_and_collates_padded_instance_masks():

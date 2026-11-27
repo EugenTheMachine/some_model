@@ -95,34 +95,44 @@ def build_assignment_targets(
             continue
 
         valid_pixels = image_labels >= 0
-        predicted_masks = assignment_probs[
-            batch_index, 1:, valid_pixels
-        ].clamp(min=1e-6, max=1.0 - 1e-6)
-        object_masks = torch.stack(
-            [
-                (image_labels[valid_pixels] == instance_id).to(
-                    dtype=predicted_masks.dtype
-                )
-                for instance_id in instance_ids
-            ],
-            dim=0,
-        )
-        log_predictions = torch.log(predicted_masks)
-        log_background = torch.log1p(-predicted_masks)
-        num_valid_pixels = max(1, int(valid_pixels.sum()))
-        bce_cost = (
-            -log_background.sum(dim=-1, keepdim=True)
-            + (log_background - log_predictions) @ object_masks.transpose(0, 1)
-        ) / num_valid_pixels
-        intersection = predicted_masks @ object_masks.transpose(0, 1)
-        denominator = (
-            predicted_masks.sum(dim=-1, keepdim=True)
-            + object_masks.sum(dim=-1).unsqueeze(0)
-        )
-        dice_cost = 1.0 - (2.0 * intersection + 1e-6) / (
-            denominator + 1e-6
-        )
-        cost = bce_weight * bce_cost + dice_weight * dice_cost
+        with torch.autocast(
+            device_type=assignment_probs.device.type,
+            enabled=False,
+        ):
+            predicted_masks = assignment_probs[
+                batch_index, 1:, valid_pixels
+            ].detach().float().clamp(min=1e-6, max=1.0 - 1e-6)
+            object_masks = torch.stack(
+                [
+                    (image_labels[valid_pixels] == instance_id).to(
+                        dtype=predicted_masks.dtype
+                    )
+                    for instance_id in instance_ids
+                ],
+                dim=0,
+            )
+            log_predictions = torch.log(predicted_masks)
+            log_background = torch.log1p(-predicted_masks)
+            num_valid_pixels = max(1, int(valid_pixels.sum()))
+            bce_cost = (
+                -log_background.sum(dim=-1, keepdim=True)
+                + (log_background - log_predictions)
+                @ object_masks.transpose(0, 1)
+            ) / num_valid_pixels
+            intersection = predicted_masks @ object_masks.transpose(0, 1)
+            denominator = (
+                predicted_masks.sum(dim=-1, keepdim=True)
+                + object_masks.sum(dim=-1).unsqueeze(0)
+            )
+            dice_cost = 1.0 - (2.0 * intersection + 1e-6) / (
+                denominator + 1e-6
+            )
+            cost = bce_weight * bce_cost + dice_weight * dice_cost
+        if not torch.isfinite(cost).all():
+            raise ValueError(
+                f"Non-finite Hungarian matching costs for image {batch_index}; "
+                "check assignment probabilities for NaN or infinity."
+            )
         predicted_indices, object_indices = linear_sum_assignment(
             cost.detach().cpu().numpy()
         )
