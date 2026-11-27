@@ -208,11 +208,14 @@ class AffinityGuidedLoss(nn.Module):
         assignment_targets, matchings = build_assignment_targets(
             outputs["assignment_probs"], label_map
         )
-        assignment_loss = F.cross_entropy(
-            outputs["assignment_logits"],
-            assignment_targets,
-            ignore_index=-1,
-        )
+        if torch.any(assignment_targets != -1):
+            assignment_loss = F.cross_entropy(
+                outputs["assignment_logits"],
+                assignment_targets,
+                ignore_index=-1,
+            )
+        else:
+            assignment_loss = outputs["assignment_logits"].sum() * 0
         mask_loss = outputs["assignment_logits"].new_zeros(())
         if self.matched_mask_weight and matchings:
             slot_probs = outputs["assignment_probs"][:, 1:]

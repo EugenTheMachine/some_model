@@ -40,7 +40,7 @@ class Segmentation_Dataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             raise ValueError("The number of images and labels must be the same.")
         self.metadata = (
             list(metadata)
-            if metadata is not None
+            if metadata
             else [None] * len(self.X)
         )
         if len(self.X) != len(self.metadata):

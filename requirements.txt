@@ -1,9 +1,13 @@
 numpy
 opencv-python-headless
+kornia
+monai
 Pillow
 PyYAML
 scikit-image
 scipy
 tifffile
 torch
+torchstain
+torchvision
 tqdm

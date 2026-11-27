@@ -77,7 +77,9 @@ def train_epoch(
                 {key: float(value) for key, value in components.items()}
             )
         losses.append(float(loss.detach()))
-        scaled_loss = loss / accumulation_steps
+        group_start = ((batch_index - 1) // accumulation_steps) * accumulation_steps
+        group_size = min(accumulation_steps, total_batches - group_start)
+        scaled_loss = loss / group_size
         if scaler is not None and scaler.is_enabled():
             scaler.scale(scaled_loss).backward()
         else:

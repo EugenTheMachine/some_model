@@ -66,6 +66,7 @@ def get_augmentation_dict(
         train_bf["flips"] = [1]
         train_bf["rotate"] = [1]
         test_bf = base_test(light_diameter)
+        test_bf["flips"] = [1]
         if augmentation_type == "kornia_intensity":
             train_bf["kornia_base_augmentations"] = [1]
         train_pc = train_bf.copy()
@@ -100,6 +101,8 @@ def get_augmentation_dict(
         )
         test_bf = base_test(light_diameter)
         test_pc = base_test(light_diameter)
+        test_bf["flips"] = [1]
+        test_pc["flips"] = [1]
     else:
         train_bf = collections.OrderedDict(
             [
@@ -121,6 +124,8 @@ def get_augmentation_dict(
         train_pc = train_bf.copy()
         test_bf = base_test(0)
         test_pc = base_test(0)
+        test_bf["flips"] = [1]
+        test_pc["flips"] = [1]
     return {
         "train": {"Brightfield": train_bf, "phase-contrast": train_pc},
         "test": {"Brightfield": test_bf, "phase-contrast": test_pc},
@@ -206,13 +211,17 @@ class Augmentations:
             }:
                 if normalized:
                     continue
+                previous_image = current_image
                 current_image, current_labels = getattr(self, transform_name)(
                     current_image,
                     current_labels,
                     amount=arguments[0] if arguments else None,
                     metadata=metadata,
                 )
-                normalized = True
+                normalized = (
+                    transform_name == "normalize"
+                    or current_image is not previous_image
+                )
             elif transform_name == "torch_rescale":
                 requested_pixel_size = arguments[0] if arguments else None
                 diameter_range = arguments[1] if len(arguments) > 1 else None
@@ -275,6 +284,13 @@ class Augmentations:
                 label_tensor = labels.detach().clone()
             else:
                 raise TypeError("Labels must be a NumPy array or PyTorch tensor.")
+            if label_tensor.dtype == torch.bool or torch.is_floating_point(label_tensor):
+                raise TypeError("Instance labels must use an integer dtype.")
+            label_tensor = label_tensor.to(torch.int64)
+            if torch.any(label_tensor < -1) or torch.any(
+                label_tensor > torch.iinfo(torch.int32).max
+            ):
+                raise ValueError("Instance labels must fit int32 and be at least -1.")
             if label_tensor.ndim == 3 and label_tensor.shape[0] == 1:
                 pass
             elif label_tensor.ndim == 3:
@@ -324,16 +340,63 @@ class Augmentations:
     def normalize_HE_stains(
         self, image: Any, labels: Any = None, amount: Any = None, metadata: Any = None
     ) -> tuple[Any, Any]:
-        """Return the input unchanged when stain references are unavailable."""
-        del amount, metadata
-        return image, labels
+        """Normalize H&E stains with a perturbed Macenko reference."""
+        return self._stain_transform(
+            image, labels, amount, metadata, hematoxylin_only=False
+        )
 
     def extract_hematoxylin_stain(
         self, image: Any, labels: Any = None, amount: Any = None, metadata: Any = None
     ) -> tuple[Any, Any]:
-        """Return the input unchanged when stain references are unavailable."""
-        del amount, metadata
-        return image, labels
+        """Extract hematoxylin with a perturbed Macenko reference."""
+        return self._stain_transform(
+            image, labels, amount, metadata, hematoxylin_only=True
+        )
+
+    @staticmethod
+    def _stain_transform(
+        image: Any,
+        labels: Any,
+        amount: Any,
+        metadata: Any,
+        *,
+        hematoxylin_only: bool,
+    ) -> tuple[Any, Any]:
+        """Apply Macenko normalization and leave input unchanged on failure."""
+        if (
+            metadata is None
+            or metadata.get("image_modality", metadata.get("modality"))
+            != "Brightfield"
+            or not isinstance(image, torch.Tensor)
+            or image.ndim != 3
+            or image.shape[0] != 3
+        ):
+            return image, labels
+        try:
+            import torchstain
+
+            stain_image = image / (image.max() + 0.001) * 255
+            stain_image = stain_image.clamp(0, 255)
+            normalizer = torchstain.normalizers.MacenkoNormalizer(
+                backend="torch"
+            )
+            normalizer.fit(stain_image)
+            perturbation = float(amount or 0)
+            normalizer.HERef += (
+                torch.rand_like(normalizer.HERef) - 0.5
+            ) * normalizer.HERef * perturbation
+            normalizer.maxCRef += (
+                torch.rand_like(normalizer.maxCRef) - 0.5
+            ) * normalizer.maxCRef * perturbation
+            normalized, hematoxylin, _ = normalizer.normalize(
+                stain_image, stains=True
+            )
+            result = hematoxylin if hematoxylin_only else normalized
+            if result.ndim == 3 and result.shape[-1] == 3:
+                result = result.movedim(-1, 0)
+            return result / 255, labels
+        except Exception:  # pylint: disable=broad-exception-caught
+            return image, labels
 
     def torch_rescale(
         self,
@@ -349,11 +412,19 @@ class Augmentations:
         modality: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Rescale and crop/pad an image and its mask with aligned geometry."""
-        del crop, random_seed, requested_pixel_size, current_pixel_size, metadata, modality
+        del crop, random_seed
         image_tensor, label_tensor = self.to_tensor(image, labels)
         scale = 1.0
+        if (
+            current_pixel_size is None
+            and metadata is not None
+            and "pixel_size" in metadata
+        ):
+            current_pixel_size = metadata["pixel_size"]
+        if current_pixel_size is not None and requested_pixel_size is not None:
+            scale = current_pixel_size / requested_pixel_size
         if amount:
-            scale = 1 + (torch.rand(1).item() - 0.5) * amount
+            scale *= 1 + (torch.rand(1).item() - 0.5) * amount
         if diameter_range is not None and label_tensor is not None:
             object_areas = [
                 int((label_tensor == instance_id).sum())
@@ -387,7 +458,7 @@ class Augmentations:
                 )[0].to(torch.int32)
         if self.shape is not None:
             image_tensor, label_tensor = self._resize_crop_pad(
-                image_tensor, label_tensor, "phase-contrast"
+                image_tensor, label_tensor, modality or "phase-contrast"
             )
         return image_tensor, label_tensor
 
@@ -417,19 +488,11 @@ class Augmentations:
                 labels = F.pad(labels, (left, right, top, bottom), value=0)
             height, width = image.shape[-2:]
         if height > target_height:
-            top = (
-                random.randint(0, height - target_height)
-                if self.mode == "train"
-                else (height - target_height) // 2
-            )
+            top = random.randint(0, height - target_height)
         else:
             top = 0
         if width > target_width:
-            left = (
-                random.randint(0, width - target_width)
-                if self.mode == "train"
-                else (width - target_width) // 2
-            )
+            left = random.randint(0, width - target_width)
         else:
             left = 0
         image = image[:, top : top + target_height, left : left + target_width]
@@ -444,13 +507,12 @@ class Augmentations:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply the same random horizontal and vertical flips to both tensors."""
         del amount, metadata
-        if self.mode == "train":
-            if random.random() > 0.5:
-                image = image.flip(-1)
-                labels = labels.flip(-1)
-            if random.random() > 0.5:
-                image = image.flip(-2)
-                labels = labels.flip(-2)
+        if random.random() > 0.5:
+            image = image.flip(-1)
+            labels = labels.flip(-1)
+        if random.random() > 0.5:
+            image = image.flip(-2)
+            labels = labels.flip(-2)
         return image, labels
 
     def rotate(
@@ -476,7 +538,9 @@ class Augmentations:
         scaled = ((image - minimum) / max(maximum - minimum, 1e-6) * 255).byte()
         pil_image = Image.fromarray(scaled.permute(1, 2, 0).cpu().numpy())
         buffer = io.BytesIO()
-        quality = random.randint(max(1, int(100 * (1 - amount))), 99)
+        quality = random.randrange(
+            int(100 * (1 - amount) - 1), 100
+        )
         pil_image.save(buffer, format="JPEG", quality=quality)
         buffer.seek(0)
         restored = torch.from_numpy(
@@ -504,8 +568,10 @@ class Augmentations:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Add a random intensity offset independently to each channel."""
         del amount, metadata
-        shifts = torch.randn(image.shape[0]) * 10
-        return image + shifts[:, None, None], labels
+        from monai.transforms import RandStdShiftIntensity
+
+        transform = RandStdShiftIntensity(10)
+        return torch.stack([transform(channel) for channel in image]), labels
 
     def AdjustContrast(
         self, image: torch.Tensor, labels: torch.Tensor, amount: float = 1.0, metadata: Any = None
@@ -523,39 +589,48 @@ class Augmentations:
         del metadata
         if image.shape[0] != 3:
             return image, labels
-        # Hue changes use PIL's HSV conversion to avoid a torchvision dependency.
-        minimum = float(image.min())
-        maximum = float(image.max())
-        scaled = ((image - minimum) / max(maximum - minimum, 1e-6) * 255).byte()
-        rgb = Image.fromarray(scaled.permute(1, 2, 0).cpu().numpy(), mode="RGB")
-        hsv = np.asarray(rgb.convert("HSV")).copy()
-        shift = int((random.random() - 0.5) * amount * 127.5)
-        hsv[..., 0] = (hsv[..., 0].astype(np.int16) + shift) % 256
-        transformed = Image.fromarray(hsv, mode="HSV").convert("RGB")
-        result = torch.from_numpy(np.asarray(transformed).copy()).permute(2, 0, 1)
-        return result.float() / 255 * (maximum - minimum) + minimum, labels
+        if amount is None:
+            return image, labels
+        from torchvision.transforms import functional as vision_functional
+
+        hue_factor = (torch.rand(1).item() - 0.5) * amount * 0.5
+        transformed = vision_functional.adjust_hue(image, hue_factor)
+        return torch.nan_to_num(transformed), labels
 
     def perspective(
         self, image: torch.Tensor, labels: torch.Tensor, amount: float = 0.0, metadata: Any = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply one paired affine approximation of a perspective warp."""
-        del metadata
+        """Apply a shared perspective transform with nearest-neighbor labels."""
+        modality = (
+            metadata.get("image_modality", metadata.get("modality"))
+            if metadata is not None
+            else None
+        )
         if not amount:
             return image, labels
         height, width = image.shape[-2:]
-        theta = image.new_tensor(
-            [[1, random.uniform(-amount, amount), 0],
-             [random.uniform(-amount, amount), 1, 0]]
-        ).unsqueeze(0)
-        grid = F.affine_grid(theta, (1, image.shape[0], height, width), align_corners=False)
-        image_out = F.grid_sample(
-            image.unsqueeze(0), grid, mode="bilinear", padding_mode="border",
-            align_corners=False,
-        )[0]
-        label_out = F.grid_sample(
-            labels.float().unsqueeze(0), grid, mode="nearest",
-            padding_mode="zeros", align_corners=False,
-        )[0].to(labels.dtype)
+        from torchvision.transforms import InterpolationMode, RandomPerspective
+        from torchvision.transforms import functional as vision_functional
+
+        startpoints, endpoints = RandomPerspective.get_params(
+            width, height, distortion_scale=amount / 2
+        )
+        image_out = vision_functional.perspective(
+            image,
+            startpoints,
+            endpoints,
+            interpolation=InterpolationMode.BILINEAR,
+            fill=float(
+                image.max() if modality == "Brightfield" else image.min()
+            ),
+        )
+        label_out = vision_functional.perspective(
+            labels,
+            startpoints,
+            endpoints,
+            interpolation=InterpolationMode.NEAREST,
+            fill=0,
+        )
         return image_out, label_out
 
     def gradient(
@@ -567,6 +642,14 @@ class Augmentations:
         x = torch.linspace(0, 0.5, width, device=image.device)
         y = torch.linspace(0, 0.5, height, device=image.device)
         grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+        if random.random() > 0.5:
+            grid_x = grid_x.flip(-1)
+        if random.random() > 0.5:
+            grid_x = grid_x.flip(-2)
+        if random.random() > 0.5:
+            grid_y = grid_y.flip(-1)
+        if random.random() > 0.5:
+            grid_y = grid_y.flip(-2)
         gradient = random.random() * grid_x + random.random() * grid_y
         return image + amount * gradient.unsqueeze(0) * image.max(), labels
 
@@ -580,21 +663,46 @@ class Augmentations:
     def kornia_base_augmentations(
         self, image: torch.Tensor, labels: torch.Tensor, amount: Any = None, metadata: Any = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply lightweight intensity perturbations without changing labels."""
+        """Apply the configured Kornia intensity sequence to one image."""
         del amount, metadata
+        from kornia import augmentation
+
         low, high = image.amin(), image.amax()
         normalized = (image - low) / (high - low).clamp_min(1e-6)
-        normalized = normalized * torch.rand((), device=image.device).add(0.5)
-        normalized = normalized + torch.randn_like(normalized) * 0.02
-        return normalized * (high - low) + low, labels
+        pipeline = torch.nn.Sequential(
+            augmentation.RandomLinearIllumination(gain=(0.1, 0.4), p=1),
+            augmentation.RandomPlasmaContrast(p=0.5),
+            augmentation.RandomSaltAndPepperNoise(),
+            augmentation.RandomMedianBlur(p=0.2),
+            augmentation.RandomGaussianBlur((3, 3), (0.1, 2.0), p=0.2),
+            augmentation.RandomBoxBlur((3, 3), p=0.2),
+            augmentation.RandomSharpness(sharpness=1, p=0.5),
+            augmentation.RandomContrast(contrast=(1, 1.5), p=0.5),
+            augmentation.RandomGamma(
+                gamma=(0.5, 0.5), gain=(0.5, 1.5), p=0.5
+            ),
+        )
+        augmented = pipeline(normalized.unsqueeze(0))[0]
+        return augmented * (high - low) + low, labels
 
     def duplicate_grayscale_channels(
         self, image: torch.Tensor, labels: torch.Tensor, metadata: Any = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Duplicate grayscale input channels or validate the configured width."""
         del metadata
-        if self.channel_invariant:
+        if self.dim_in == 1 and image.shape[0] == 3:
+            image = (
+                image[0:1] * 0.299
+                + image[1:2] * 0.587
+                + image[2:3] * 0.114
+            )
+        if self.channel_invariant and image.shape[0] == self.dim_in:
             return image, labels
+        if self.channel_invariant:
+            raise ValueError(
+                f"Channel-invariant input has {image.shape[0]} channels, "
+                f"but the model expects {self.dim_in}."
+            )
         if image.shape[0] == 1 and self.dim_in != 1:
             image = image.repeat(self.dim_in, 1, 1)
         elif image.shape[0] != self.dim_in:

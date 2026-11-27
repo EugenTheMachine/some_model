@@ -206,6 +206,10 @@ class InstanSegModel:
                     base_overrides[key] = value
         self.config = load_config(config_source, base_overrides)
         validate_config(self.config)
+        if self.config["preprocessing"]["dim_in"] != self.config["model"]["input_channels"]:
+            raise ValueError(
+                "preprocessing.dim_in must match model.input_channels."
+            )
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
@@ -217,6 +221,32 @@ class InstanSegModel:
             self._initial_checkpoint = load_checkpoint(
                 self._checkpoint_path, self.device
             )
+
+    def _load_effective_config(
+        self, overrides: Mapping[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """Merge checkpoint, constructor, prior-run, and call-time settings."""
+        effective_overrides: dict[str, Any] = dict(self._checkpoint_config or {})
+        for update in (self.config, self._constructor_overrides, overrides):
+            for key, value in update.items():
+                if isinstance(value, Mapping) and isinstance(
+                    effective_overrides.get(key), Mapping
+                ):
+                    effective_overrides[key] = {
+                        **effective_overrides[key],
+                        **value,
+                    }
+                else:
+                    effective_overrides[key] = value
+        config = load_config(
+            self._config_path or DEFAULT_CONFIG_PATH, effective_overrides
+        )
+        validate_config(config)
+        if config["preprocessing"]["dim_in"] != config["model"]["input_channels"]:
+            raise ValueError(
+                "preprocessing.dim_in must match model.input_channels."
+            )
+        return config
 
     def _build_model(self, config: Mapping[str, Any] | None = None) -> nn.Module:
         """Construct the registered model selected by configuration."""
@@ -319,6 +349,7 @@ class InstanSegModel:
                 "dataset": dataset,
                 "batch_size": batch_size,
                 "sampler": sampler,
+                "generator": generator,
                 "collate_fn": collate_fn,
                 "num_workers": num_workers,
                 "pin_memory": torch.cuda.is_available(),
@@ -336,10 +367,7 @@ class InstanSegModel:
         from .loss import AffinityGuidedLoss
         from .train import train_epoch
 
-        config = load_config(
-            self._config_path or DEFAULT_CONFIG_PATH,
-            {**self._constructor_overrides, **overrides},
-        )
+        config = self._load_effective_config(overrides)
         seed_everything(config["preprocessing"]["seed"])
         if config["meta"]["experiment_name"] is None:
             config["meta"]["experiment_name"] = generated_experiment_name()
@@ -565,7 +593,7 @@ class InstanSegModel:
                 for path in (checkpoint_dir / "best.pt", run_dir / "best.pt"):
                     save_checkpoint(path, checkpoint)
                 self.logger.info("Best checkpoint updated: %s", checkpoint_dir / "best.pt")
-            if validate and not improved and patience_count > patience:
+            if validate and not improved and patience_count >= patience:
                 self.logger.info("Early stopping at epoch %d", epoch)
                 break
 
@@ -608,10 +636,7 @@ class InstanSegModel:
 
         if subset not in {"val", "test"}:
             raise ValueError("subset must be either 'val' or 'test'.")
-        config = load_config(
-            self._config_path or DEFAULT_CONFIG_PATH,
-            {**self._constructor_overrides, **overrides},
-        )
+        config = self._load_effective_config(overrides)
         splits, datasets = self._prepare_data(config, training=False)
         if not splits[subset][0]:
             raise ValueError(f"The requested {subset!r} split is empty.")

@@ -125,6 +125,8 @@ def load_config(
         section: values.copy() for section, values in DEFAULT_CONFIG.items()
     }
     path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
+    if config_path is not None and not path.is_file():
+        raise FileNotFoundError(f"Configuration file not found: {path}")
     if path.is_file():
         with path.open("r", encoding="utf-8") as file:
             loaded = yaml.safe_load(file) or {}
@@ -176,6 +178,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
     if not isinstance(meta.get("data_dir"), (str, Path)) or not str(meta["data_dir"]):
         raise ValueError("meta.data_dir must be a non-empty path.")
+    meta["data_dir"] = str(meta["data_dir"])
     experiment_name = meta.get("experiment_name")
     if experiment_name is not None and (
         not isinstance(experiment_name, str)
@@ -216,6 +219,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
         _require_int(training[key], key, 0)
     for key in ("val_ratio", "test_ratio"):
         _require_finite(training[key], key, 0.0, 1.0)
+    if training["val_ratio"] + training["test_ratio"] > 1:
+        raise ValueError("val_ratio and test_ratio must sum to at most 1.")
     resume = training["resume"]
     if not isinstance(resume, bool) and (
         not isinstance(resume, str) or not resume.strip()
@@ -235,17 +240,27 @@ def validate_config(config: Mapping[str, Any]) -> None:
     _require_finite(model["dropout"], "dropout", 0.0, 1.0)
     if model["dropout"] == 1:
         raise ValueError("dropout must be less than 1.")
-    if not isinstance(model["backbone_channels"], (list, tuple)) or not model["backbone_channels"]:
-        raise ValueError("backbone_channels must be a non-empty sequence.")
+    if (
+        not isinstance(model["backbone_channels"], (list, tuple))
+        or len(model["backbone_channels"]) < 2
+    ):
+        raise ValueError("backbone_channels must contain at least two widths.")
     for channel in model["backbone_channels"]:
         _require_int(channel, "backbone channel", 1)
-    if len(model["mlp_channels"]) != 2:
+    if (
+        not isinstance(model["mlp_channels"], (list, tuple))
+        or len(model["mlp_channels"]) != 2
+    ):
         raise ValueError("mlp_channels must contain exactly two values.")
     for channel in model["mlp_channels"]:
         _require_int(channel, "MLP channel", 1)
     if not isinstance(model["use_aggregation"], bool):
         raise ValueError("use_aggregation must be a boolean.")
+    if not isinstance(model["pretrained_backbone"], bool):
+        raise ValueError("pretrained_backbone must be a boolean.")
 
+    if not isinstance(optimizer["type"], str):
+        raise ValueError("optimizer.type must be a string.")
     optimizer_type = optimizer["type"].lower()
     if optimizer_type not in {"adamw", "sgd"}:
         raise ValueError("optimizer.type must be AdamW or SGD.")
@@ -253,9 +268,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if optimizer["learning_rate"] == 0:
         raise ValueError("learning_rate must be greater than zero.")
     _require_finite(optimizer["weight_decay"], "weight_decay", 0.0)
-    _require_finite(optimizer["momentum"], "momentum", 0.0, 1.0)
-    if optimizer["momentum"] == 1:
-        raise ValueError("momentum must be less than one.")
+    if optimizer_type == "sgd":
+        _require_finite(optimizer["momentum"], "momentum", 0.0, 1.0)
+        if optimizer["momentum"] == 1:
+            raise ValueError("momentum must be less than one.")
     _require_finite(optimizer["backbone_lr_mult"], "backbone_lr_mult", 0.0)
     optimizer["type"] = "SGD" if optimizer_type == "sgd" else "AdamW"
 
@@ -272,6 +288,7 @@ def seed_everything(seed: int) -> None:
 
 
 def rng_state() -> dict[str, Any]:
+    """Capture process-wide random-number-generator state for checkpoints."""
     state: dict[str, Any] = {
         "python": random.getstate(),
         "numpy": np.random.get_state(),
@@ -283,6 +300,7 @@ def rng_state() -> dict[str, Any]:
 
 
 def restore_rng_state(state: Mapping[str, Any]) -> None:
+    """Restore the RNG states captured by :func:`rng_state`."""
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"])
@@ -312,6 +330,7 @@ def create_logger(log_path: Path, name: str = "some_model") -> logging.Logger:
 
 
 def generated_experiment_name() -> str:
+    """Return a filesystem-safe name for a new experiment."""
     return datetime.now().strftime("ag_mlp_%Y%m%d_%H%M%S")
 
 

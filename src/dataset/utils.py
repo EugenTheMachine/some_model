@@ -51,6 +51,10 @@ def _read_mask(path: Path) -> np.ndarray:
     mask = np.asarray(mask)
     if mask.ndim != 2 or not np.issubdtype(mask.dtype, np.integer):
         raise ValueError(f"Mask must be a 2D integer instance map: {path}")
+    if np.any(mask < -1) or np.any(mask > np.iinfo(np.int32).max):
+        raise ValueError(
+            f"Mask labels must fit int32 and be at least -1: {path}"
+        )
     return mask.astype(np.int32, copy=False)
 
 
@@ -204,7 +208,7 @@ def _load_torch_dataset(
         for item in items:
             if not isinstance(item, dict) or "cell_masks" not in item:
                 continue
-            if item.get("duplicate", False):
+            if item.get("duplicate", item.get("is_duplicate", False)):
                 continue
             metadata = {
                 key: value
@@ -248,6 +252,8 @@ def _load_torch_dataset(
                 mask = mask[0]
             if mask.ndim != 2:
                 raise ValueError("Each .pth cell_masks value must be a 2D map.")
+            if np.any(mask < -1) or np.any(mask > np.iinfo(np.int32).max):
+                raise ValueError("Each .pth cell_masks value must fit int32 and be >= -1.")
             if _image_spatial_shape(image) != mask.shape:
                 raise ValueError("A .pth image and its cell_masks have different dimensions.")
             result[split].append(
@@ -326,7 +332,16 @@ def load_dataset_splits(
         data_path = (Path(__file__).resolve().parents[2] / data_path).resolve()
     dataset_argument = str(config.get("dataset", ""))
     if data_path.suffix.lower() == ".pth" or dataset_argument.endswith(".pth"):
-        default_root = Path(os.environ.setdefault("INSTANSEG_DATASET_PATH", str(data_path.parent)))
+        default_dataset_root = (
+            data_path.parent
+            if data_path.suffix.lower() == ".pth"
+            else data_path
+        )
+        default_root = Path(
+            os.environ.setdefault(
+                "INSTANSEG_DATASET_PATH", str(default_dataset_root)
+            )
+        )
         dataset_path = (
             data_path
             if data_path.suffix.lower() == ".pth"
@@ -353,13 +368,21 @@ def load_dataset_splits(
         float(config.get("train_data_ratio", 1.0)),
         seed,
     )
-    if "val" not in items_by_split or not items_by_split["val"]:
+    is_torch_dataset = data_path.suffix.lower() == ".pth" or dataset_argument.endswith(
+        ".pth"
+    )
+    test_items: list[Any] = []
+    if is_torch_dataset:
+        val_items = items_by_split.get("val", [])
+        test_items = items_by_split.get("test", [])
+    elif "val" not in items_by_split or not items_by_split["val"]:
         train_items, val_items = _split_training_validation(
             train_items, float(config.get("val_ratio", 0.2)), seed
         )
     else:
         val_items = items_by_split["val"]
-    test_items = items_by_split.get("test") or val_items
+    if not is_torch_dataset:
+        test_items = items_by_split.get("test") or val_items
     packed = {
         "train": _pack_items(train_items),
         "val": _pack_items(val_items),
@@ -367,8 +390,8 @@ def load_dataset_splits(
     }
     if not packed["train"][0]:
         raise ValueError("No training image/mask pairs were found.")
-    if data_path.suffix.lower() == ".pth":
+    if is_torch_dataset:
         for split, (images, _, _) in packed.items():
-            if split != "train" and not images:
+            if not images:
                 raise ValueError(f"The requested {split} .pth split is empty.")
     return packed
