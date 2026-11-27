@@ -44,6 +44,12 @@ model:
   recurrent_iterations: 3
   slot_iterations: 2
   minimum_instance_area: 0
+  foreground_threshold: 0.5
+  peak_min_distance: 5
+  peak_min_height: null
+  peak_prominence: null
+  gaussian_sigma: 0.0
+  connectivity: 8
 
 optimizer:
   type: AdamW

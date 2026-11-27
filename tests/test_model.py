@@ -30,6 +30,10 @@ from src.model.model import (
     InstanSegModel,
 )
 from src.model.semantic import SemanticSegmentationLoss, SemanticSegmentationUNet
+from src.model.distance_transform_watershed import (
+    UNet_DistanceTransform_Watershed,
+    distance_transform_watershed,
+)
 from src.model.train import train_epoch
 from src.model.utils import load_config
 
@@ -362,6 +366,36 @@ def test_semantic_unet_emits_binary_foreground_logits_and_backpropagates():
     assert logits.shape == (2, 1, 32, 32)
     assert torch.isfinite(loss)
     assert model.output.weight.grad is not None
+
+
+def test_distance_transform_watershed_separates_touching_disks():
+    probability = np.zeros((32, 32), dtype=np.float32)
+    for center in ((12, 12), (20, 20)):
+        row, column = np.ogrid[:32, :32]
+        probability[(row - center[0]) ** 2 + (column - center[1]) ** 2 <= 7 ** 2] = 1
+
+    labels = distance_transform_watershed(
+        probability,
+        threshold=0.5,
+        min_distance=5,
+    )
+
+    assert labels.shape == (32, 32)
+    assert set(np.unique(labels)) >= {0, 1, 2}
+
+
+def test_distance_transform_watershed_unet_has_one_channel_and_postprocesses():
+    model = UNet_DistanceTransform_Watershed(
+        in_channels=1,
+        channels=(4, 8, 16),
+        foreground_threshold=0.5,
+        peak_min_distance=4,
+    )
+    logits = model(torch.randn(1, 1, 32, 32))
+    instance_map = model.reconstruct_instances(logits)
+
+    assert logits.shape == (1, 1, 32, 32)
+    assert instance_map.shape == (32, 32)
 
 
 def test_configuration_rejects_unsupported_optimizer():

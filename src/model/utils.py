@@ -65,6 +65,12 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "recurrent_iterations": 3,
         "slot_iterations": 2,
         "minimum_instance_area": 0,
+        "foreground_threshold": 0.5,
+        "peak_min_distance": 5,
+        "peak_min_height": None,
+        "peak_prominence": None,
+        "gaussian_sigma": 0.0,
+        "connectivity": 8,
     },
     "optimizer": {
         "type": "AdamW",
@@ -118,6 +124,12 @@ FLAT_OVERRIDE_SECTIONS = {
     "hidden_channels": "model",
     "slot_iterations": "model",
     "minimum_instance_area": "model",
+    "foreground_threshold": "model",
+    "peak_min_distance": "model",
+    "peak_min_height": "model",
+    "peak_prominence": "model",
+    "gaussian_sigma": "model",
+    "connectivity": "model",
     "num_recurrent_iterations": "model",
     "slot_update_iterations": "model",
     "optimizer_type": "optimizer",
@@ -262,6 +274,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "affinity_guided_recurrent_unet",
         "instanseg_unet",
         "semantic_unet",
+        "distance_transform_watershed",
+        "unet_distance_transform_watershed",
+        "UNet_DistanceTransform_Watershed",
     }:
         raise ValueError(f"Unsupported model_name: {model['model_name']!r}")
     for key in (
@@ -289,6 +304,18 @@ def validate_config(config: Mapping[str, Any]) -> None:
     ):
         _require_int(model[key], key, 1)
     _require_int(model["minimum_instance_area"], "minimum_instance_area", 0)
+    _require_int(model["peak_min_distance"], "peak_min_distance", 1)
+    _require_int(model["connectivity"], "connectivity", 4)
+    if model["connectivity"] not in {4, 8}:
+        raise ValueError("connectivity must be either 4 or 8.")
+    _require_finite(
+        model["foreground_threshold"], "foreground_threshold", 0.0, 1.0
+    )
+    _require_finite(model["gaussian_sigma"], "gaussian_sigma", 0.0)
+    for key in ("peak_min_height", "peak_prominence"):
+        value = model[key]
+        if value is not None:
+            _require_finite(value, key, 0.0)
     _require_int(model["freeze_backbone_epochs"], "freeze_backbone_epochs", 0)
     _require_finite(model["dropout"], "dropout", 0.0, 1.0)
     if model["dropout"] == 1:
@@ -307,7 +334,12 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("unet_channels must contain at least two widths.")
     for channel in model["unet_channels"]:
         _require_int(channel, "U-Net channel", 1)
-    if model["model_name"] == "semantic_unet":
+    if model["model_name"] in {
+        "semantic_unet",
+        "distance_transform_watershed",
+        "unet_distance_transform_watershed",
+        "UNet_DistanceTransform_Watershed",
+    }:
         downsampling_factor = 2 ** (len(model["unet_channels"]) - 1)
         if preprocessing["imgsz"] % downsampling_factor:
             raise ValueError(

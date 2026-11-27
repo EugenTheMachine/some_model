@@ -103,14 +103,17 @@ class SemanticSegmentationLoss(nn.Module):
             labels = labels.unsqueeze(1)
         if logits.shape != labels.shape:
             raise ValueError("Semantic logits and masks must have equal shapes.")
-        targets = labels.to(dtype=logits.dtype)
-        if torch.any((targets != 0) & (targets != 1)):
-            raise ValueError("Semantic masks must contain only zero and one.")
-        bce = F.binary_cross_entropy_with_logits(logits, targets)
+        valid = labels >= 0
+        targets = (labels > 0).to(dtype=logits.dtype)
+        if not torch.any(valid):
+            return logits.sum() * 0.0
+        bce = F.binary_cross_entropy_with_logits(
+            logits[valid], targets[valid]
+        )
         probabilities = logits.sigmoid()
-        intersection = (probabilities * targets).sum()
+        intersection = ((probabilities * targets) * valid).sum()
         dice = 1.0 - (2.0 * intersection + 1e-6) / (
-            probabilities.sum() + targets.sum() + 1e-6
+            (probabilities * valid).sum() + (targets * valid).sum() + 1e-6
         )
         return bce + dice
 

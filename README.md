@@ -21,6 +21,14 @@ Select `model_name="semantic_unet"` and configure `unet_channels` to train it
 through the same data-loading and checkpointing facade. In this mode, all
 nonzero ground-truth mask pixels are converted to foreground value 1.
 
+The distance-transform watershed baseline is available as
+`model_name="distance_transform_watershed"` (also
+`UNet_DistanceTransform_Watershed`). It uses the classical U-Net for binary
+foreground prediction, then extracts EDT local maxima and seeded watershed
+instances. Configure `foreground_threshold`, `peak_min_distance`,
+`peak_min_height`, `peak_prominence`, `gaussian_sigma`,
+`minimum_instance_area`, and `connectivity`.
+
 ## Setup
 
 Install the dependencies from `requirements.txt`. Configure the dataset and

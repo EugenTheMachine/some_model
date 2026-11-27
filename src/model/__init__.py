@@ -35,6 +35,15 @@ from .semantic import (
     SemanticSegmentationUNet,
     eval_semantic_epoch,
 )
+from .distance_transform_watershed import (
+    DistanceTransformWatershedUNet,
+    UNet_DistanceTransform_Watershed,
+    distance_transform_watershed,
+    extract_distance_transform_markers,
+    extract_watershed_markers,
+    reconstruct_distance_transform_watershed,
+    reconstruct_instances,
+)
 from .train import train_epoch
 
 __all__ = [
@@ -59,6 +68,13 @@ __all__ = [
     "RecurrentInstanceSegmentationNet",
     "SemanticSegmentationLoss",
     "SemanticSegmentationUNet",
+    "UNet_DistanceTransform_Watershed",
+    "DistanceTransformWatershedUNet",
+    "distance_transform_watershed",
+    "extract_watershed_markers",
+    "extract_distance_transform_markers",
+    "reconstruct_instances",
+    "reconstruct_distance_transform_watershed",
     "RecurrentSlotGrouping",
     "SpatialConvGRU",
     "build_affinity_targets",

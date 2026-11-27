@@ -27,6 +27,7 @@ from .semantic import (
     SemanticSegmentationUNet,
     eval_semantic_epoch,
 )
+from .distance_transform_watershed import UNet_DistanceTransform_Watershed
 from .utils import (
     DEFAULT_CONFIG_PATH,
     PROJECT_ROOT,
@@ -375,6 +376,22 @@ class InstanSegModel:
                 layers=model_config.get("layers", (256, 128, 64, 32)),
                 dropout=model_config["dropout"],
             )
+        if model_config["model_name"] in {
+            "distance_transform_watershed",
+            "unet_distance_transform_watershed",
+            "UNet_DistanceTransform_Watershed",
+        }:
+            return UNet_DistanceTransform_Watershed(
+                in_channels=model_config["input_channels"],
+                channels=model_config["unet_channels"],
+                foreground_threshold=model_config["foreground_threshold"],
+                peak_min_distance=model_config["peak_min_distance"],
+                peak_min_height=model_config["peak_min_height"],
+                peak_prominence=model_config["peak_prominence"],
+                gaussian_sigma=model_config["gaussian_sigma"],
+                minimum_instance_area=model_config["minimum_instance_area"],
+                connectivity=model_config["connectivity"],
+            )
         if model_config["model_name"] == "semantic_unet":
             return SemanticSegmentationUNet(
                 in_channels=model_config["input_channels"],
@@ -453,7 +470,12 @@ class InstanSegModel:
                 mode="train" if training and split_name == "train" else "test",
                 augmentation_type=config["preprocessing"]["augmentation_type"],
                 channel_invariant=config["preprocessing"]["dim_in"] == 1,
-                binarize_masks=config["model"]["model_name"] == "semantic_unet",
+                binarize_masks=config["model"]["model_name"] in {
+                    "semantic_unet",
+                    "distance_transform_watershed",
+                    "unet_distance_transform_watershed",
+                    "UNet_DistanceTransform_Watershed",
+                },
             )
         return splits, datasets
 
@@ -522,7 +544,15 @@ class InstanSegModel:
         from .train import train_epoch
 
         config = self._load_effective_config(overrides)
-        semantic_mode = config["model"]["model_name"] == "semantic_unet"
+        watershed_names = {
+            "distance_transform_watershed",
+            "unet_distance_transform_watershed",
+            "UNet_DistanceTransform_Watershed",
+        }
+        semantic_mode = config["model"]["model_name"] in {
+            "semantic_unet",
+            *watershed_names,
+        }
         dela_mode = config["model"]["model_name"] in {
             "dela_net",
             "discriminative_embedding_learned_assignment",
@@ -869,7 +899,12 @@ class InstanSegModel:
                 self.model.load_state_dict(state)
         self.model.eval()
         amp_enabled = config["training"]["amp"] and self.device.type == "cuda"
-        if config["model"]["model_name"] == "semantic_unet":
+        if config["model"]["model_name"] in {
+            "semantic_unet",
+            "distance_transform_watershed",
+            "unet_distance_transform_watershed",
+            "UNet_DistanceTransform_Watershed",
+        }:
             results = eval_semantic_epoch(
                 self.model,
                 self.device,
