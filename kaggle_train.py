@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
+import io
 import json
 import os
 import shutil
@@ -163,11 +165,39 @@ def run_kaggle_command(
     return result
 
 
+def kernel_exists(environment: dict[str, str], kernel_id: str) -> bool:
+    """Return whether an exact Kaggle kernel ref already exists for the owner."""
+    if "/" not in kernel_id:
+        raise ValueError("Kernel id must use the Kaggle owner/slug format.")
+    _owner, slug = kernel_id.split("/", 1)
+    result = run_kaggle_command(
+        ["kernels", "list", "--mine", "--csv", "--search", slug],
+        environment,
+    )
+    stdout = getattr(result, "stdout", "")
+    if not isinstance(stdout, str) or not stdout.strip():
+        return False
+    for row in csv.DictReader(io.StringIO(stdout)):
+        if str(row.get("ref", "")).strip() == kernel_id:
+            return True
+    return False
+
+
+def ensure_kernel_is_new(environment: dict[str, str], kernel_id: str) -> None:
+    """Stop before push if the configured ref would update an existing kernel."""
+    if kernel_exists(environment, kernel_id):
+        raise RuntimeError(
+            f"Refusing to add a version to existing Kaggle kernel {kernel_id}. "
+            "Change the id in kernel-metadata.json to a unique kernel slug."
+        )
+
+
 def push_notebook(environment: dict[str, str]) -> None:
-    """Publish a new notebook version configured for a Tesla T4."""
+    """Create a new Kaggle kernel configured for a Tesla T4."""
     metadata = build_kernel_metadata()
     if not metadata.get("enable_gpu") or not GPU_ACCELERATOR:
         raise ValueError("GPU metadata and an accelerator must be configured.")
+    ensure_kernel_is_new(environment, metadata["id"])
     with tempfile.TemporaryDirectory(prefix="kaggle-training-upload-") as temp_dir:
         upload_dir = Path(temp_dir)
         staged_path = stage_kernel(upload_dir)

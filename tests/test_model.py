@@ -305,6 +305,38 @@ def test_kaggle_staging_rejects_non_notebook_json(tmp_path):
         kaggle_train.stage_kernel(tmp_path / "stage", notebook_path, metadata_path)
 
 
+def test_kaggle_refuses_existing_kernel(monkeypatch):
+    """A configured kernel slug must not be pushed again as a new version."""
+    csv_output = "ref,title\nowner/new-kernel,New kernel\n"
+    monkeypatch.setattr(
+        kaggle_train,
+        "run_kaggle_command",
+        lambda *_args, **_kwargs: type(
+            "Result",
+            (),
+            {"stdout": csv_output},
+        )(),
+    )
+
+    with pytest.raises(RuntimeError, match="Refusing to add a version"):
+        kaggle_train.ensure_kernel_is_new({}, "owner/new-kernel")
+
+
+def test_kaggle_allows_absent_kernel(monkeypatch):
+    """An unused kernel slug passes the pre-push existence check."""
+    monkeypatch.setattr(
+        kaggle_train,
+        "run_kaggle_command",
+        lambda *_args, **_kwargs: type(
+            "Result",
+            (),
+            {"stdout": "ref,title\n"},
+        )(),
+    )
+
+    kaggle_train.ensure_kernel_is_new({}, "owner/new-kernel")
+
+
 def test_kaggle_notebook_validation_rejects_invalid_python(tmp_path):
     """Notebook code cells are syntax-checked before staging."""
     notebook_path = tmp_path / "training_kernel.ipynb"
