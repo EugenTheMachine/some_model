@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
+from scipy import ndimage
 
 import kaggle_train
 from src.dataset.augmentations import Augmentations
@@ -29,10 +30,20 @@ from src.model.model import (
     DiscriminativeEmbeddingLearnedAssignmentNet,
     InstanSegModel,
 )
-from src.model.semantic import SemanticSegmentationLoss, SemanticSegmentationUNet
+from src.model.semantic import (
+    SemanticSegmentationLoss,
+    SemanticSegmentationUNet,
+    eval_semantic_epoch,
+)
 from src.model.distance_transform_watershed import (
     UNet_DistanceTransform_Watershed,
     distance_transform_watershed,
+)
+from src.model.learned_distance_watershed import (
+    LearnedDistanceWatershedLoss,
+    UNet_LearnedDistance_Watershed,
+    build_learned_distance_targets,
+    reconstruct_learned_distance_watershed,
 )
 from src.model.train import train_epoch
 from src.model.utils import load_config
@@ -398,6 +409,72 @@ def test_distance_transform_watershed_unet_has_one_channel_and_postprocesses():
     assert instance_map.shape == (32, 32)
 
 
+def test_learned_distance_targets_preserve_instances_and_normalize_distances():
+    labels = torch.zeros((1, 1, 12, 12), dtype=torch.int32)
+    labels[0, 0, 2:7, 2:7] = 4
+    labels[0, 0, 2:7, 7:10] = 9
+    labels[0, 0, 0, 0] = -1
+
+    targets, valid = build_learned_distance_targets(labels)
+
+    assert targets.shape == (1, 3, 12, 12)
+    assert valid.shape == (1, 1, 12, 12)
+    assert targets[0, 0, 3, 3] == 1
+    assert targets[0, 0, 0, 1] == 0
+    assert not valid[0, 0, 0, 0]
+    assert torch.all((targets[:, 1:] >= 0) & (targets[:, 1:] <= 1))
+    assert targets[0, 1, 4, 4] == 0
+    assert targets[0, 2, 2, 2] == 0
+    assert targets[0, 2, 4, 4] == 1
+
+
+def test_learned_distance_unet_and_loss_train_all_three_channels():
+    model = UNet_LearnedDistance_Watershed(
+        in_channels=1,
+        channels=(4, 8, 16),
+    )
+    images = torch.randn(2, 1, 32, 32)
+    labels = torch.zeros((2, 1, 32, 32), dtype=torch.int32)
+    labels[:, :, 8:24, 8:24] = 3
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        predictions = model(images)
+        loss = LearnedDistanceWatershedLoss()(predictions, labels)
+    loss.backward()
+
+    assert predictions.shape == (2, 3, 32, 32)
+    assert torch.all((predictions >= 0) & (predictions <= 1))
+    assert torch.isfinite(loss)
+    assert model.output.weight.grad is not None
+    assert torch.count_nonzero(model.output.weight.grad) > 0
+
+
+def test_learned_distance_watershed_separates_touching_instances():
+    predictions = np.zeros((3, 32, 32), dtype=np.float32)
+    predictions[1] = 1.0
+    rows, columns = np.ogrid[:32, :32]
+    centers = ((15, 11), (15, 19))
+    for row, column in centers:
+        disk = (rows - row) ** 2 + (columns - column) ** 2 <= 7 ** 2
+        predictions[0, disk] = 1
+        predictions[1, disk] = np.minimum(
+            predictions[1, disk],
+            np.sqrt((rows - row) ** 2 + (columns - column) ** 2)[disk] / 7,
+        )
+        boundary = ndimage.distance_transform_edt(disk)
+        predictions[2, disk] = np.maximum(
+            predictions[2, disk], boundary[disk] / boundary[disk].max()
+        )
+
+    labels = reconstruct_learned_distance_watershed(
+        predictions,
+        center_threshold=0.35,
+        boundary_threshold=0.5,
+    )
+
+    assert set(np.unique(labels)) >= {0, 1, 2}
+
+
 def test_configuration_rejects_unsupported_optimizer():
     """Unknown optimizer names fail configuration validation."""
     with pytest.raises(ValueError, match="optimizer.type"):
@@ -446,6 +523,31 @@ def test_object_metrics_are_perfect_for_an_exact_instance_map():
 
     for metric in ("precision", "recall", "f1", "ap50", "ap75", "aji", "pq", "boundary_f1"):
         assert result[metric] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_semantic_evaluation_reports_reconstructed_object_metrics():
+    """Watershed-style models expose object metrics alongside pixel metrics."""
+    instance_map = torch.zeros((8, 8), dtype=torch.int32)
+    instance_map[1:3, 1:3] = 1
+    instance_map[5:7, 5:7] = 2
+    labels = instance_map[None, None]
+
+    class ReconstructableModel(torch.nn.Module):
+        def forward(self, inputs):
+            return torch.zeros_like(inputs)
+
+        def reconstruct_instances(self, predictions):
+            return instance_map
+
+    result = eval_semantic_epoch(
+        ReconstructableModel(),
+        torch.device("cpu"),
+        [(torch.zeros((1, 1, 8, 8)), labels)],
+        SemanticSegmentationLoss(),
+    )
+
+    assert result["object_f1"] == pytest.approx(1.0, abs=1e-6)
+    assert result["object_pq"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_optional_paired_augmentations_preserve_label_geometry():
@@ -512,7 +614,8 @@ def test_facade_trains_saves_and_evaluates(tmp_path, monkeypatch):
     for index in range(2):
         image = np.full((32, 32), 40 + index * 20, dtype=np.uint8)
         mask = np.zeros((32, 32), dtype=np.uint8)
-        mask[6:20, 6:20] = 3
+        mask[6:16, 6:16] = 3
+        mask[19:28, 19:28] = 7
         Image.fromarray(image).save(image_dir / f"cell_{index}.png")
         Image.fromarray(mask).save(mask_dir / f"cell_{index}.png")
     monkeypatch.setattr(model_module, "PROJECT_ROOT", tmp_path)
@@ -563,6 +666,41 @@ def test_facade_trains_saves_and_evaluates(tmp_path, monkeypatch):
 
     assert len(semantic_history) == 1
     assert {"loss", "pixel_accuracy", "dice", "iou"} <= semantic_result.keys()
+
+    learned_distance_facade = InstanSegModel(
+        data_dir=str(data_dir),
+        experiment_name="learned-distance-integration",
+        imgsz=32,
+        batch_size=1,
+        epochs=1,
+        warmup_epochs=0,
+        num_workers=0,
+        input_channels=1,
+        dim_in=1,
+        model_name="learned_distance_watershed",
+        unet_channels=[4, 8, 16],
+        center_distance_threshold=0.35,
+        boundary_distance_threshold=0.5,
+    )
+    learned_distance_history = learned_distance_facade.train()
+    learned_distance_results = learned_distance_facade.eval(subset="test")
+    _, learned_datasets = learned_distance_facade._prepare_data(
+        learned_distance_facade._load_effective_config({}), training=False
+    )
+    preserved_instance_ids = {
+        int(label)
+        for dataset in learned_datasets.values()
+        if dataset is not None
+        for mask in dataset.Y
+        for label in np.unique(mask)
+    }
+
+    assert len(learned_distance_history) == 1
+    assert {"loss", "aji", "pq", "boundary_f1"} <= learned_distance_results.keys()
+    assert {0, 3, 7} <= preserved_instance_ids
+    assert isinstance(
+        learned_distance_facade.model, UNet_LearnedDistance_Watershed
+    )
 
     dela_facade = InstanSegModel(
         data_dir=str(data_dir),

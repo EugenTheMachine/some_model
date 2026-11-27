@@ -71,6 +71,9 @@ DEFAULT_CONFIG: dict[str, dict[str, Any]] = {
         "peak_prominence": None,
         "gaussian_sigma": 0.0,
         "connectivity": 8,
+        "center_distance_threshold": 0.35,
+        "boundary_distance_threshold": 0.5,
+        "minimum_marker_area": 1,
     },
     "optimizer": {
         "type": "AdamW",
@@ -130,6 +133,9 @@ FLAT_OVERRIDE_SECTIONS = {
     "peak_prominence": "model",
     "gaussian_sigma": "model",
     "connectivity": "model",
+    "center_distance_threshold": "model",
+    "boundary_distance_threshold": "model",
+    "minimum_marker_area": "model",
     "num_recurrent_iterations": "model",
     "slot_update_iterations": "model",
     "optimizer_type": "optimizer",
@@ -277,6 +283,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "distance_transform_watershed",
         "unet_distance_transform_watershed",
         "UNet_DistanceTransform_Watershed",
+        "learned_distance_watershed",
+        "unet_learned_distance_watershed",
+        "UNet_LearnedDistance_Watershed",
     }:
         raise ValueError(f"Unsupported model_name: {model['model_name']!r}")
     for key in (
@@ -304,6 +313,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     ):
         _require_int(model[key], key, 1)
     _require_int(model["minimum_instance_area"], "minimum_instance_area", 0)
+    _require_int(model["minimum_marker_area"], "minimum_marker_area", 1)
     _require_int(model["peak_min_distance"], "peak_min_distance", 1)
     _require_int(model["connectivity"], "connectivity", 4)
     if model["connectivity"] not in {4, 8}:
@@ -311,6 +321,8 @@ def validate_config(config: Mapping[str, Any]) -> None:
     _require_finite(
         model["foreground_threshold"], "foreground_threshold", 0.0, 1.0
     )
+    for key in ("center_distance_threshold", "boundary_distance_threshold"):
+        _require_finite(model[key], key, 0.0, 1.0)
     _require_finite(model["gaussian_sigma"], "gaussian_sigma", 0.0)
     for key in ("peak_min_height", "peak_prominence"):
         value = model[key]
@@ -339,6 +351,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
         "distance_transform_watershed",
         "unet_distance_transform_watershed",
         "UNet_DistanceTransform_Watershed",
+        "learned_distance_watershed",
+        "unet_learned_distance_watershed",
+        "UNet_LearnedDistance_Watershed",
     }:
         downsampling_factor = 2 ** (len(model["unet_channels"]) - 1)
         if preprocessing["imgsz"] % downsampling_factor:

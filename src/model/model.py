@@ -28,6 +28,11 @@ from .semantic import (
     eval_semantic_epoch,
 )
 from .distance_transform_watershed import UNet_DistanceTransform_Watershed
+from .learned_distance_watershed import (
+    LearnedDistanceWatershedLoss,
+    UNet_LearnedDistance_Watershed,
+    eval_learned_distance_watershed_epoch,
+)
 from .utils import (
     DEFAULT_CONFIG_PATH,
     PROJECT_ROOT,
@@ -392,6 +397,21 @@ class InstanSegModel:
                 minimum_instance_area=model_config["minimum_instance_area"],
                 connectivity=model_config["connectivity"],
             )
+        if model_config["model_name"] in {
+            "learned_distance_watershed",
+            "unet_learned_distance_watershed",
+            "UNet_LearnedDistance_Watershed",
+        }:
+            return UNet_LearnedDistance_Watershed(
+                in_channels=model_config["input_channels"],
+                channels=model_config["unet_channels"],
+                foreground_threshold=model_config["foreground_threshold"],
+                center_threshold=model_config["center_distance_threshold"],
+                boundary_threshold=model_config["boundary_distance_threshold"],
+                minimum_marker_area=model_config["minimum_marker_area"],
+                minimum_instance_area=model_config["minimum_instance_area"],
+                connectivity=model_config["connectivity"],
+            )
         if model_config["model_name"] == "semantic_unet":
             return SemanticSegmentationUNet(
                 in_channels=model_config["input_channels"],
@@ -553,6 +573,14 @@ class InstanSegModel:
             "semantic_unet",
             *watershed_names,
         }
+        learned_distance_names = {
+            "learned_distance_watershed",
+            "unet_learned_distance_watershed",
+            "UNet_LearnedDistance_Watershed",
+        }
+        learned_distance_mode = (
+            config["model"]["model_name"] in learned_distance_names
+        )
         dela_mode = config["model"]["model_name"] in {
             "dela_net",
             "discriminative_embedding_learned_assignment",
@@ -614,6 +642,8 @@ class InstanSegModel:
         self.model = self._build_model(config).to(self.device)
         if semantic_mode:
             loss_fn = SemanticSegmentationLoss()
+        elif learned_distance_mode:
+            loss_fn = LearnedDistanceWatershedLoss()
         elif dela_mode:
             loss_fn = DiscriminativeEmbeddingLearnedAssignmentLoss(
                 matched_mask_weight=config["model"]["matched_mask_weight"]
@@ -766,7 +796,16 @@ class InstanSegModel:
             improved = False
             if validate:
                 self.logger.info("Validation starting for epoch %d", epoch)
-                if semantic_mode:
+                if learned_distance_mode:
+                    validation = eval_learned_distance_watershed_epoch(
+                        self.model,
+                        self.device,
+                        loaders["val"],
+                        loss_fn,
+                        amp=amp_enabled,
+                        progress_description="Validation",
+                    )
+                elif semantic_mode:
                     validation = eval_semantic_epoch(
                         self.model,
                         self.device,
@@ -842,7 +881,16 @@ class InstanSegModel:
             self.model.load_state_dict(final_checkpoint["model_state_dict"])
         if loaders.get("test") is not None:
             self.logger.info("Final test evaluation starting.")
-            if semantic_mode:
+            if learned_distance_mode:
+                test_results = eval_learned_distance_watershed_epoch(
+                    self.model,
+                    self.device,
+                    loaders["test"],
+                    loss_fn,
+                    amp=amp_enabled,
+                    progress_description="Test",
+                )
+            elif semantic_mode:
                 test_results = eval_semantic_epoch(
                     self.model,
                     self.device,
@@ -899,7 +947,21 @@ class InstanSegModel:
                 self.model.load_state_dict(state)
         self.model.eval()
         amp_enabled = config["training"]["amp"] and self.device.type == "cuda"
-        if config["model"]["model_name"] in {
+        learned_distance_names = {
+            "learned_distance_watershed",
+            "unet_learned_distance_watershed",
+            "UNet_LearnedDistance_Watershed",
+        }
+        if config["model"]["model_name"] in learned_distance_names:
+            results = eval_learned_distance_watershed_epoch(
+                self.model,
+                self.device,
+                loaders[subset],
+                LearnedDistanceWatershedLoss(),
+                amp=amp_enabled,
+                progress_description=subset.capitalize(),
+            )
+        elif config["model"]["model_name"] in {
             "semantic_unet",
             "distance_transform_watershed",
             "unet_distance_transform_watershed",

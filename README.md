@@ -28,6 +28,20 @@ foreground prediction, then extracts EDT local maxima and seeded watershed
 instances. Configure `foreground_threshold`, `peak_min_distance`,
 `peak_min_height`, `peak_prominence`, `gaussian_sigma`,
 `minimum_instance_area`, and `connectivity`.
+Validation and test metrics include instance-level precision, recall, and F1
+(`object_precision`, `object_recall`, and `object_f1`), with a true positive
+defined by a one-to-one instance match at IoU >= 0.5. The logs also report
+`object_aji`, `object_pq`, and `object_boundary_f1`.
+
+The learned-geometry watershed model is available as
+`model_name="learned_distance_watershed"` (also
+`UNet_LearnedDistance_Watershed`). It preserves instance IDs during training
+and learns foreground probability, normalized center distance, and normalized
+boundary distance with a U-Net matching the baseline architecture. Its
+validation and inference stage extracts markers from the learned distances and
+uses the predicted center distance as the seeded watershed surface. Tune
+`center_distance_threshold`, `boundary_distance_threshold`, and
+`minimum_marker_area` on the validation split.
 
 ## Setup
 

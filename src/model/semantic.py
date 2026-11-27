@@ -127,7 +127,9 @@ def eval_semantic_epoch(
     amp: bool = False,
     progress_description: str = "Validation",
 ) -> dict[str, float]:
-    """Evaluate semantic segmentation loss and pixel-level metrics."""
+    """Evaluate pixel metrics and, when available, reconstructed object metrics."""
+    from .eval import InstanceSegmentationMetrics
+
     model.eval()
     losses: list[float] = []
     intersection = 0
@@ -135,6 +137,10 @@ def eval_semantic_epoch(
     target_count = 0
     correct = 0
     pixel_count = 0
+    reconstruct_instances = getattr(model, "reconstruct_instances", None)
+    instance_metrics = (
+        InstanceSegmentationMetrics() if callable(reconstruct_instances) else None
+    )
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc=progress_description, leave=False):
             if len(batch) == 3:
@@ -159,12 +165,40 @@ def eval_semantic_epoch(
             target_count += int(targets.sum())
             correct += int((predictions == targets).sum())
             pixel_count += targets.numel()
+            if instance_metrics is not None:
+                instance_maps = reconstruct_instances(logits)
+                if instance_maps.ndim == 2:
+                    instance_maps = instance_maps[None]
+                instance_metrics.update(
+                    {
+                        "instance_map": torch.as_tensor(
+                            instance_maps, device=labels.device
+                        )
+                    },
+                    labels,
+                )
 
     epsilon = 1e-8
     union = predicted_count + target_count - intersection
-    return {
+    result = {
         "loss": float(np.mean(losses)) if losses else 0.0,
         "pixel_accuracy": correct / max(1, pixel_count),
         "dice": 2 * intersection / (predicted_count + target_count + epsilon),
         "iou": intersection / (union + epsilon),
     }
+    if instance_metrics is not None:
+        object_metrics = instance_metrics.compute()
+        result.update(
+            {
+                f"object_{name}": object_metrics[name]
+                for name in (
+                    "precision",
+                    "recall",
+                    "f1",
+                    "aji",
+                    "pq",
+                    "boundary_f1",
+                )
+            }
+        )
+    return result

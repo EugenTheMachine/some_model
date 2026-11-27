@@ -50,6 +50,9 @@ model:
   peak_prominence: null
   gaussian_sigma: 0.0
   connectivity: 8
+  center_distance_threshold: 0.35
+  boundary_distance_threshold: 0.5
+  minimum_marker_area: 1
 
 optimizer:
   type: AdamW
